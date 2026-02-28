@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+.git/
+.github/
+.env
+.venv/
+venv/
+templine_bot.db
+*.sqlite
+*.sqlite3
+*.db
+.templine_bot.lock

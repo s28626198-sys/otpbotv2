@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: templine-otp-bot
+    runtime: docker
+    plan: starter
+    autoDeploy: true
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: TEMPLINE_API_KEY
+        sync: false
+      - key: ADMIN_USER_ID
+        value: "5742928021"
+      - key: SUPABASE_URL
+        value: "https://zpavyjdtbydfceamfzwg.supabase.co"
+      - key: SUPABASE_DB_PASSWORD
+        sync: false
+      - key: TEMPLINE_BASE_URL
+        value: "https://smsbower.page/stubs/handler_api.php"
+      - key: POLL_INTERVAL_SECONDS
+        value: "4"
+      - key: CANCEL_LOCK_SECONDS
+        value: "180"
+      - key: MAX_MONITOR_SECONDS
+        value: "1500"
+      - key: WEBHOOK_PATH
+        value: "/telegram-webhook"
+      - key: WEBHOOK_URL
+        fromService:
+          type: web
+          name: templine-otp-bot
+          property: url

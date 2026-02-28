@@ -1,0 +1,202 @@
+{
+  "info": {
+    "_postman_id": "0e2f4f4f-5b29-4f0a-b2bc-53a44742c001",
+    "name": "SMSBower Client API",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Get Balance",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/stubs/handler_api.php?api_key={{apiKey}}&action=getBalance",
+          "host": ["{{baseUrl}}"],
+          "path": ["stubs", "handler_api.php"],
+          "query": [
+            { "key": "api_key", "value": "{{apiKey}}" },
+            { "key": "action", "value": "getBalance" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Get Number",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/stubs/handler_api.php?api_key={{apiKey}}&action=getNumber&service={{service}}&country={{country}}&maxPrice={{maxPrice}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["stubs", "handler_api.php"],
+          "query": [
+            { "key": "api_key", "value": "{{apiKey}}" },
+            { "key": "action", "value": "getNumber" },
+            { "key": "service", "value": "{{service}}" },
+            { "key": "country", "value": "{{country}}" },
+            { "key": "maxPrice", "value": "{{maxPrice}}" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Get Status",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/stubs/handler_api.php?api_key={{apiKey}}&action=getStatus&id={{activationId}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["stubs", "handler_api.php"],
+          "query": [
+            { "key": "api_key", "value": "{{apiKey}}" },
+            { "key": "action", "value": "getStatus" },
+            { "key": "id", "value": "{{activationId}}" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Set Status",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/stubs/handler_api.php?api_key={{apiKey}}&action=setStatus&id={{activationId}}&status={{status}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["stubs", "handler_api.php"],
+          "query": [
+            { "key": "api_key", "value": "{{apiKey}}" },
+            { "key": "action", "value": "setStatus" },
+            { "key": "id", "value": "{{activationId}}" },
+            { "key": "status", "value": "{{status}}" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Get Services List",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/stubs/handler_api.php?api_key={{apiKey}}&action=getServicesList",
+          "host": ["{{baseUrl}}"],
+          "path": ["stubs", "handler_api.php"],
+          "query": [
+            { "key": "api_key", "value": "{{apiKey}}" },
+            { "key": "action", "value": "getServicesList" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Get Countries",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/stubs/handler_api.php?api_key={{apiKey}}&action=getCountries",
+          "host": ["{{baseUrl}}"],
+          "path": ["stubs", "handler_api.php"],
+          "query": [
+            { "key": "api_key", "value": "{{apiKey}}" },
+            { "key": "action", "value": "getCountries" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Get Number V2",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/stubs/handler_api.php?api_key={{apiKey}}&action=getNumberV2&service={{service}}&country={{country}}&maxPrice={{maxPrice}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["stubs", "handler_api.php"],
+          "query": [
+            { "key": "api_key", "value": "{{apiKey}}" },
+            { "key": "action", "value": "getNumberV2" },
+            { "key": "service", "value": "{{service}}" },
+            { "key": "country", "value": "{{country}}" },
+            { "key": "maxPrice", "value": "{{maxPrice}}" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Get Prices",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/stubs/handler_api.php?api_key={{apiKey}}&action=getPrices&service={{service}}&country={{country}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["stubs", "handler_api.php"],
+          "query": [
+            { "key": "api_key", "value": "{{apiKey}}" },
+            { "key": "action", "value": "getPrices" },
+            { "key": "service", "value": "{{service}}" },
+            { "key": "country", "value": "{{country}}" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Get Prices V2",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/stubs/handler_api.php?api_key={{apiKey}}&action=getPricesV2&service={{service}}&country={{country}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["stubs", "handler_api.php"],
+          "query": [
+            { "key": "api_key", "value": "{{apiKey}}" },
+            { "key": "action", "value": "getPricesV2" },
+            { "key": "service", "value": "{{service}}" },
+            { "key": "country", "value": "{{country}}" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Get Prices V3",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{baseUrl}}/stubs/handler_api.php?api_key={{apiKey}}&action=getPricesV3&service={{service}}&country={{country}}",
+          "host": ["{{baseUrl}}"],
+          "path": ["stubs", "handler_api.php"],
+          "query": [
+            { "key": "api_key", "value": "{{apiKey}}" },
+            { "key": "action", "value": "getPricesV3" },
+            { "key": "service", "value": "{{service}}" },
+            { "key": "country", "value": "{{country}}" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Get Static Wallet",
+      "request": {
+        "method": "GET",
+        "url": {
+          "raw": "{{walletBaseUrl}}/api/payment/getActualWalletAddress?api_key={{apiKey}}&coin={{coin}}&network={{network}}",
+          "host": ["{{walletBaseUrl}}"],
+          "path": ["api", "payment", "getActualWalletAddress"],
+          "query": [
+            { "key": "api_key", "value": "{{apiKey}}" },
+            { "key": "coin", "value": "{{coin}}" },
+            { "key": "network", "value": "{{network}}" }
+          ]
+        }
+      }
+    }
+  ],
+  "variable": [
+    { "key": "baseUrl", "value": "https://smsbower.page" },
+    { "key": "walletBaseUrl", "value": "https://smsbower.page" },
+    { "key": "apiKey", "value": "" },
+    { "key": "service", "value": "go" },
+    { "key": "country", "value": "1" },
+    { "key": "maxPrice", "value": "0.2" },
+    { "key": "activationId", "value": "" },
+    { "key": "status", "value": "6" },
+    { "key": "coin", "value": "usdt" },
+    { "key": "network", "value": "tron" }
+  ]
+}
