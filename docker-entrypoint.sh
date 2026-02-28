@@ -9,9 +9,12 @@ if [ -z "${WEBHOOK_URL:-}" ] && [ -n "${RENDER_EXTERNAL_URL:-}" ]; then
   export WEBHOOK_URL="${RENDER_EXTERNAL_URL}"
 fi
 
-if [ -z "${WEBHOOK_URL:-}" ]; then
-  echo "ERROR: WEBHOOK_URL or RENDER_EXTERNAL_URL is required for web service mode."
-  exit 1
+# Stable default for Render web services: polling + health server on $PORT.
+if [ -n "${RENDER:-}" ] && [ -z "${BOT_TRANSPORT:-}" ]; then
+  export BOT_TRANSPORT="polling"
+fi
+if [ -z "${ENABLE_HEALTH_SERVER:-}" ]; then
+  export ENABLE_HEALTH_SERVER="1"
 fi
 
 exec python smsbower_premium_bot.py

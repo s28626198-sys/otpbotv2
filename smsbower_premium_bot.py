@@ -9,6 +9,7 @@ import sqlite3
 import socket
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -3645,6 +3646,67 @@ def build_app() -> Application:
     return app
 
 
+def env_truthy(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def should_use_webhook() -> bool:
+    mode = os.getenv("BOT_TRANSPORT", "auto").strip().lower()
+    if mode == "polling":
+        return False
+    if mode == "webhook":
+        return True
+    if env_truthy("FORCE_POLLING", default=False):
+        return False
+    return bool(os.getenv("WEBHOOK_URL", "").strip())
+
+
+class _HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        body = b"OK"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_HEAD(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        return
+
+
+def start_health_server_if_needed(use_webhook: bool) -> Optional[ThreadingHTTPServer]:
+    if use_webhook:
+        return None
+    if not env_truthy("ENABLE_HEALTH_SERVER", default=bool(os.getenv("RENDER"))):
+        return None
+    port_raw = os.getenv("PORT", "").strip()
+    if not port_raw:
+        return None
+    try:
+        port = int(port_raw)
+    except ValueError:
+        logger.warning("Invalid PORT for health server: %s", port_raw)
+        return None
+    try:
+        server = ThreadingHTTPServer(("0.0.0.0", port), _HealthHandler)
+        t = threading.Thread(target=server.serve_forever, daemon=True, name="health-server")
+        t.start()
+        logger.info("Health server listening on 0.0.0.0:%s", port)
+        return server
+    except OSError as e:
+        logger.warning("Health server bind failed on port %s: %s", port, e)
+        return None
+
+
 def main() -> None:
     logging.basicConfig(format="%(asctime)s | %(levelname)s | %(name)s | %(message)s", level=logging.INFO)
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -3684,29 +3746,41 @@ def main() -> None:
         BASE_URL,
         SUPABASE_URL,
     )
+    use_webhook = should_use_webhook()
+    health_server = start_health_server_if_needed(use_webhook)
     app = build_app()
     logger.info("Templine bot boot complete. Role-based mode enabled. Admin user_id=%s", ADMIN_USER_ID)
     webhook_url = os.getenv("WEBHOOK_URL", "").strip()
-    if webhook_url:
-        path = os.getenv("WEBHOOK_PATH", "/telegram-webhook")
-        logger.info("Starting webhook mode at %s%s", webhook_url.rstrip("/"), path)
-        app.run_webhook(
-            listen=os.getenv("WEBHOOK_LISTEN", "0.0.0.0"),
-            port=int(os.getenv("PORT", "8443")),
-            webhook_url=f"{webhook_url.rstrip('/')}{path}",
-            webhook_path=path,
-            drop_pending_updates=True,
-        )
-    else:
-        logger.info("Starting polling mode")
-        clear_telegram_webhook_if_polling(BOT_TOKEN)
-        print("Templine bot is running in polling mode. Press Ctrl+C to stop.", flush=True)
-        app.run_polling(
-            drop_pending_updates=True,
-            allowed_updates=Update.ALL_TYPES,
-            poll_interval=0.5,
-            timeout=15,
-        )
+    try:
+        if use_webhook and webhook_url:
+            path = os.getenv("WEBHOOK_PATH", "/telegram-webhook")
+            logger.info("Starting webhook mode at %s%s", webhook_url.rstrip("/"), path)
+            app.run_webhook(
+                listen=os.getenv("WEBHOOK_LISTEN", "0.0.0.0"),
+                port=int(os.getenv("PORT", "8443")),
+                webhook_url=f"{webhook_url.rstrip('/')}{path}",
+                webhook_path=path,
+                drop_pending_updates=True,
+            )
+        else:
+            if use_webhook and not webhook_url:
+                logger.warning("BOT_TRANSPORT=webhook but WEBHOOK_URL is empty. Falling back to polling mode.")
+            logger.info("Starting polling mode")
+            clear_telegram_webhook_if_polling(BOT_TOKEN)
+            print("Templine bot is running in polling mode. Press Ctrl+C to stop.", flush=True)
+            app.run_polling(
+                drop_pending_updates=True,
+                allowed_updates=Update.ALL_TYPES,
+                poll_interval=0.5,
+                timeout=15,
+            )
+    finally:
+        if health_server is not None:
+            try:
+                health_server.shutdown()
+                health_server.server_close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":
