@@ -398,7 +398,7 @@ This repo now includes a ready-to-run Telegram bot:
 
 - Script: `smsbower_premium_bot.py`
 - Requirements: `requirements.txt`
-- Database: `templine_bot.db` (auto-created)
+- Database: Supabase (persistent cloud database)
 - Languages: English, Bengali, Hindi, Arabic, Russian
 
 ### Run
@@ -420,7 +420,8 @@ PowerShell quick run (Windows):
 BOT_TOKEN=your_telegram_bot_token
 TEMPLINE_API_KEY=your_templine_api_key
 TEMPLINE_BASE_URL=https://smsbower.page/stubs/handler_api.php
-BOT_DATABASE=templine_bot.db
+SUPABASE_URL=https://your-project-ref.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
 ADMIN_USER_ID=5742928021
 POLL_INTERVAL_SECONDS=4
 ```
@@ -468,11 +469,7 @@ Set these in Render (or via `render.yaml` where marked `sync: false`):
 
 - `BOT_TOKEN`
 - `TEMPLINE_API_KEY`
-- `SUPABASE_DB_PASSWORD`
-- `SUPABASE_DB_DSN` (optional, recommended; full Postgres DSN)
-- `SUPABASE_DB_HOST` (optional override)
-- `SUPABASE_DB_PORT` (default `5432`; Supabase pooler often uses `6543`)
-- `SUPABASE_FORCE_IPV4` (recommended `1` on Render)
+- `SUPABASE_SERVICE_ROLE_KEY`
 
 Already prefilled in `render.yaml`:
 
@@ -494,11 +491,8 @@ Already prefilled in `render.yaml`:
 
 This keeps existing bot flows unchanged while making deployment production-ready.
 
-### IPv6 / Supabase Connectivity Note
+### E) Supabase One-Time Setup
 
-If deploy logs show `Network is unreachable` for Supabase host:
-
-1. Set `SUPABASE_FORCE_IPV4=1` (already default in `render.yaml`).
-2. Prefer Supabase pooler connection by setting either:
-   - `SUPABASE_DB_DSN` from Supabase Dashboard, or
-   - `SUPABASE_DB_HOST` to pooler host + `SUPABASE_DB_PORT` (often `6543`).
+1. Open Supabase Dashboard -> SQL Editor.
+2. Run [`supabase_schema.sql`](./supabase_schema.sql) once.
+3. Deploy/redeploy Render service.

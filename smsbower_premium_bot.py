@@ -15,8 +15,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from urllib.parse import urlparse
 
 import httpx
-import psycopg
-from psycopg.rows import dict_row
+from supabase import create_client
 from telegram import (
     BotCommand,
     ForceReply,
@@ -1509,6 +1508,324 @@ class SupabaseDB:
                         )
                     c.commit()
                     return True
+
+
+class SupabaseRESTDB:
+    def __init__(self):
+        self.lock = threading.Lock()
+        if not SUPABASE_URL:
+            raise SystemExit("SUPABASE_URL is required")
+        if not SUPABASE_SERVICE_ROLE_KEY:
+            raise SystemExit("SUPABASE_SERVICE_ROLE_KEY is required")
+        self.sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        self.init()
+
+    @staticmethod
+    def _rows(resp: Any) -> List[Dict[str, Any]]:
+        data = getattr(resp, "data", None)
+        if isinstance(data, list):
+            return [dict(x) for x in data if isinstance(x, dict)]
+        if isinstance(data, dict):
+            return [dict(data)]
+        return []
+
+    @classmethod
+    def _one(cls, resp: Any) -> Optional[Dict[str, Any]]:
+        rows = cls._rows(resp)
+        return rows[0] if rows else None
+
+    def _require_schema(self) -> None:
+        try:
+            self.sb.table("users").select("user_id").limit(1).execute()
+            self.sb.table("activations").select("activation_id").limit(1).execute()
+            self.sb.table("deposits").select("id").limit(1).execute()
+            self.sb.table("settings").select("key").limit(1).execute()
+        except Exception as e:
+            raise SystemExit(
+                "Supabase tables are missing. Run SQL from `supabase_schema.sql` in Supabase SQL Editor. "
+                f"Details: {e}"
+            )
+
+    def init(self) -> None:
+        self._require_schema()
+        self.set_setting("profit_percent", self.get_setting("profit_percent", "20") or "20")
+        self.set_setting("payment_methods", self.get_setting("payment_methods", "{}") or "{}")
+        self.ensure_admin_user(ADMIN_USER_ID)
+
+    def get(self, user_id: int) -> Optional[Dict[str, Any]]:
+        with self.lock:
+            return self._one(self.sb.table("users").select("*").eq("user_id", int(user_id)).limit(1).execute())
+
+    def upsert(
+        self,
+        user_id: int,
+        chat_id: int,
+        lang: Optional[str] = None,
+        role: Optional[str] = None,
+        username: Optional[str] = None,
+        full_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        with self.lock:
+            old = self.get(user_id)
+            ts = now_ts()
+            if not old:
+                self.sb.table("users").insert(
+                    {
+                        "user_id": int(user_id),
+                        "chat_id": int(chat_id),
+                        "username": username,
+                        "full_name": full_name,
+                        "lang": lang or "en",
+                        "role": role or ROLE_PENDING,
+                        "created": ts,
+                        "updated": ts,
+                    }
+                ).execute()
+            else:
+                payload: Dict[str, Any] = {
+                    "chat_id": int(chat_id),
+                    "username": username if username is not None else old.get("username"),
+                    "full_name": full_name if full_name is not None else old.get("full_name"),
+                    "updated": ts,
+                }
+                if lang is not None:
+                    payload["lang"] = lang
+                if role is not None:
+                    payload["role"] = role
+                self.sb.table("users").update(payload).eq("user_id", int(user_id)).execute()
+            return self.get(user_id) or {}
+
+    def set_lang(self, user_id: int, chat_id: int, lang: str) -> None:
+        self.upsert(user_id, chat_id, lang=lang)
+
+    def ensure_admin_user(self, user_id: int) -> None:
+        with self.lock:
+            ts = now_ts()
+            row = self.get(user_id)
+            if not row:
+                self.sb.table("users").insert(
+                    {
+                        "user_id": int(user_id),
+                        "chat_id": int(user_id),
+                        "lang": "en",
+                        "role": ROLE_ADMIN,
+                        "approval_notified": True,
+                        "approved_by": int(user_id),
+                        "approved_at": ts,
+                        "created": ts,
+                        "updated": ts,
+                    }
+                ).execute()
+            else:
+                self.sb.table("users").update(
+                    {
+                        "role": ROLE_ADMIN,
+                        "approval_notified": True,
+                        "approved_by": int(user_id),
+                        "approved_at": row.get("approved_at") or ts,
+                        "updated": ts,
+                    }
+                ).eq("user_id", int(user_id)).execute()
+
+    def mark_approval_notified(self, user_id: int) -> None:
+        with self.lock:
+            self.sb.table("users").update({"approval_notified": True, "updated": now_ts()}).eq("user_id", int(user_id)).execute()
+
+    def set_role(self, user_id: int, role: str, approved_by: Optional[int] = None) -> None:
+        with self.lock:
+            ts = now_ts()
+            payload: Dict[str, Any] = {"role": role, "approval_notified": True, "updated": ts}
+            if approved_by is not None:
+                payload["approved_by"] = int(approved_by)
+            if role in {ROLE_ADMIN, ROLE_USER, ROLE_SUPER}:
+                payload["approved_at"] = ts
+            self.sb.table("users").update(payload).eq("user_id", int(user_id)).execute()
+
+    def list_pending_users(self) -> List[Dict[str, Any]]:
+        with self.lock:
+            return self._rows(self.sb.table("users").select("*").eq("role", ROLE_PENDING).order("created", desc=False).limit(200).execute())
+
+    def list_all_users(self, include_blocked: bool = True) -> List[Dict[str, Any]]:
+        with self.lock:
+            q = self.sb.table("users").select("*").order("created", desc=False)
+            if not include_blocked:
+                q = q.neq("role", ROLE_BLOCKED)
+            return self._rows(q.execute())
+
+    def user_stats(self) -> Dict[str, int]:
+        out = {"total": 0, "pending": 0, "user": 0, "super_user": 0, "admin": 0, "blocked": 0}
+        rows = self.list_all_users(include_blocked=True)
+        out["total"] = len(rows)
+        for r in rows:
+            k = role_of(r)
+            out[k] = out.get(k, 0) + 1
+        return out
+
+    def get_setting(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        with self.lock:
+            row = self._one(self.sb.table("settings").select("value").eq("key", key).limit(1).execute())
+            return str(row.get("value")) if row else default
+
+    def set_setting(self, key: str, value: str) -> None:
+        with self.lock:
+            self.sb.table("settings").upsert({"key": key, "value": str(value), "updated": now_ts()}, on_conflict="key").execute()
+
+    def get_profit_percent(self) -> Decimal:
+        return profit_percent_from_settings({"profit_percent": self.get_setting("profit_percent", "20")})
+
+    def set_profit_percent(self, pct: Decimal) -> None:
+        p = max(Decimal("0"), min(Decimal("500"), dec(pct)))
+        self.set_setting("profit_percent", money(p))
+
+    def get_payment_settings(self) -> Dict[str, str]:
+        raw = self.get_setting("payment_methods", "{}") or "{}"
+        try:
+            obj = json.loads(raw)
+            if isinstance(obj, dict):
+                return {str(k): str(v) for k, v in obj.items()}
+        except Exception:
+            pass
+        return {}
+
+    def update_payment_settings(self, items: Dict[str, str]) -> Dict[str, str]:
+        cur = self.get_payment_settings()
+        for k, v in items.items():
+            kk = str(k or "").strip().lower()
+            if kk:
+                cur[kk] = str(v or "").strip()
+        self.set_setting("payment_methods", json.dumps(cur, ensure_ascii=False))
+        return cur
+
+    def adjust_balance(self, user_id: int, delta: Decimal, require_non_negative: bool = False) -> Optional[Decimal]:
+        with self.lock:
+            row = self.get(user_id)
+            if not row:
+                return None
+            new_bal = dec(row.get("balance", "0")) + dec(delta)
+            if require_non_negative and new_bal < 0:
+                return None
+            self.sb.table("users").update({"balance": money(new_bal), "updated": now_ts()}).eq("user_id", int(user_id)).execute()
+            return new_bal
+
+    def get_balance(self, user_id: int) -> Decimal:
+        return dec((self.get(user_id) or {}).get("balance", "0"))
+
+    def set_activation(self, user_id: int, chat_id: int, aid: str, service: str, country: str, provider_id: Optional[str], phone: str) -> None:
+        with self.lock:
+            self.sb.table("users").update(
+                {
+                    "chat_id": int(chat_id),
+                    "activation_id": str(aid),
+                    "activation_started_at": now_ts(),
+                    "service_code": str(service),
+                    "country_code": str(country),
+                    "provider_id": provider_id,
+                    "phone": phone,
+                    "polling": 1,
+                    "updated": now_ts(),
+                }
+            ).eq("user_id", int(user_id)).execute()
+
+    def clear_activation(self, user_id: int) -> None:
+        with self.lock:
+            self.sb.table("users").update(
+                {
+                    "activation_id": None,
+                    "activation_started_at": None,
+                    "service_code": None,
+                    "country_code": None,
+                    "provider_id": None,
+                    "phone": None,
+                    "polling": 0,
+                    "updated": now_ts(),
+                }
+            ).eq("user_id", int(user_id)).execute()
+
+    def active_rows(self) -> List[Dict[str, Any]]:
+        rows = self._rows(self.sb.table("users").select("*").eq("polling", 1).execute())
+        return [r for r in rows if r.get("activation_id") and r.get("chat_id")]
+
+    def add_activation(self, user_id: int, chat_id: int, activation_id: str, service_code: str, country_code: str, provider_id: Optional[str], phone: str, base_price: Any = 0, charged_price: Any = 0) -> None:
+        with self.lock:
+            ts = now_ts()
+            self.sb.table("activations").upsert(
+                {
+                    "activation_id": str(activation_id),
+                    "user_id": int(user_id),
+                    "chat_id": int(chat_id),
+                    "service_code": str(service_code),
+                    "country_code": str(country_code),
+                    "provider_id": provider_id,
+                    "phone": phone,
+                    "status": "active",
+                    "otp_code": None,
+                    "base_price": money(dec(base_price)),
+                    "charged_price": money(dec(charged_price)),
+                    "refunded": False,
+                    "refund_amount": "0",
+                    "created_at": ts,
+                    "updated_at": ts,
+                },
+                on_conflict="activation_id",
+            ).execute()
+
+    def get_activation(self, activation_id: str) -> Optional[Dict[str, Any]]:
+        return self._one(self.sb.table("activations").select("*").eq("activation_id", str(activation_id)).limit(1).execute())
+
+    def set_activation_status(self, activation_id: str, status: str, otp_code: Optional[str] = None) -> None:
+        with self.lock:
+            payload: Dict[str, Any] = {"status": status, "updated_at": now_ts()}
+            if otp_code is not None:
+                payload["otp_code"] = otp_code
+            self.sb.table("activations").update(payload).eq("activation_id", str(activation_id)).execute()
+            if status != "active":
+                self.sb.table("users").update({"polling": 0, "updated": now_ts()}).eq("activation_id", str(activation_id)).execute()
+
+    def list_active_activations(self) -> List[Dict[str, Any]]:
+        return self._rows(self.sb.table("activations").select("*").eq("status", "active").execute())
+
+    def latest_active_activation_for_user(self, user_id: int) -> Optional[Dict[str, Any]]:
+        return self._one(self.sb.table("activations").select("*").eq("user_id", int(user_id)).eq("status", "active").order("created_at", desc=True).limit(1).execute())
+
+    def refund_activation_if_needed(self, activation_id: str) -> Optional[Dict[str, Any]]:
+        with self.lock:
+            act = self.get_activation(activation_id)
+            if not act:
+                return None
+            charged = dec(act.get("charged_price", "0"))
+            if bool(act.get("refunded")) or charged <= 0:
+                return None
+            self.sb.table("activations").update({"refunded": True, "refund_amount": money(charged), "updated_at": now_ts()}).eq("activation_id", str(activation_id)).eq("refunded", False).execute()
+            uid = int(act.get("user_id"))
+            self.adjust_balance(uid, charged, require_non_negative=False)
+            return {"user_id": uid, "amount": money(charged)}
+
+    def create_deposit(self, user_id: int, amount: Decimal) -> int:
+        resp = self.sb.table("deposits").insert({"user_id": int(user_id), "amount": money(dec(amount)), "status": "awaiting_proof", "created_at": now_ts(), "updated_at": now_ts()}).execute()
+        row = self._one(resp)
+        if not row:
+            raise RuntimeError("failed to create deposit")
+        return int(row["id"])
+
+    def set_deposit_proof(self, deposit_id: int, txid: str, screenshot_file_id: str) -> None:
+        self.sb.table("deposits").update({"txid": txid, "screenshot_file_id": screenshot_file_id, "status": "pending", "updated_at": now_ts()}).eq("id", int(deposit_id)).execute()
+
+    def get_deposit(self, deposit_id: int) -> Optional[Dict[str, Any]]:
+        return self._one(self.sb.table("deposits").select("*").eq("id", int(deposit_id)).limit(1).execute())
+
+    def latest_open_deposit_for_user(self, user_id: int) -> Optional[Dict[str, Any]]:
+        return self._one(self.sb.table("deposits").select("*").eq("user_id", int(user_id)).eq("status", "awaiting_proof").order("created_at", desc=True).limit(1).execute())
+
+    def update_deposit_status(self, deposit_id: int, status: str, reviewed_by: int, note: Optional[str] = None) -> bool:
+        dep = self.get_deposit(deposit_id)
+        if not dep:
+            return False
+        if str(dep.get("status")) not in {"pending", "awaiting_proof"}:
+            return False
+        self.sb.table("deposits").update({"status": status, "reviewed_by": int(reviewed_by), "reviewed_at": now_ts(), "note": note, "updated_at": now_ts()}).eq("id", int(deposit_id)).execute()
+        if status == "approved":
+            self.adjust_balance(int(dep.get("user_id")), dec(dep.get("amount", "0")), require_non_negative=False)
+        return True
 
 
 class TemplineAPI:
@@ -3231,7 +3548,7 @@ def build_app() -> Application:
         .post_shutdown(post_shutdown)
         .build()
     )
-    app.bot_data["db"] = SupabaseDB(build_supabase_pg_dsn())
+    app.bot_data["db"] = SupabaseRESTDB()
     app.bot_data["api"] = TemplineAPI(API_KEY, BASE_URL)
     app.bot_data["tasks"] = {}
 
@@ -3292,11 +3609,10 @@ def main() -> None:
         raise SystemExit("BOT_TOKEN missing (.env or environment variable required)")
     if not API_KEY:
         raise SystemExit("TEMPLINE_API_KEY/SMSBOWER_API_KEY missing (.env or environment variable required)")
-    if not SUPABASE_DB_DSN:
-        if not SUPABASE_DB_PASSWORD:
-            raise SystemExit("SUPABASE_DB_PASSWORD missing (.env or environment variable required)")
-        if not SUPABASE_URL and not SUPABASE_DB_HOST:
-            raise SystemExit("SUPABASE_URL or SUPABASE_DB_HOST is required")
+    if not SUPABASE_URL:
+        raise SystemExit("SUPABASE_URL missing (.env or environment variable required)")
+    if not SUPABASE_SERVICE_ROLE_KEY:
+        raise SystemExit("SUPABASE_SERVICE_ROLE_KEY missing (.env or environment variable required)")
     if "YOUR_REAL_SMSBOWER_API_KEY" in API_KEY:
         raise SystemExit("SMSBOWER API key is placeholder. Set real API key.")
     validate_telegram_token(BOT_TOKEN)
@@ -3317,11 +3633,10 @@ def main() -> None:
         pass
 
     logger.info(
-        "Startup config: ADMIN_USER_ID=%s | BASE_URL=%s | SUPABASE=%s | FORCE_IPV4=%s",
+        "Startup config: ADMIN_USER_ID=%s | BASE_URL=%s | SUPABASE_URL=%s | MODE=supabase-py",
         ADMIN_USER_ID,
         BASE_URL,
-        ("DSN" if SUPABASE_DB_DSN else (SUPABASE_URL or SUPABASE_DB_HOST)),
-        SUPABASE_FORCE_IPV4,
+        SUPABASE_URL,
     )
     app = build_app()
     logger.info("Templine bot boot complete. Role-based mode enabled. Admin user_id=%s", ADMIN_USER_ID)

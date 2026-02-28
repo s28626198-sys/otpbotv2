@@ -13,16 +13,8 @@ services:
         value: "5742928021"
       - key: SUPABASE_URL
         value: "https://zpavyjdtbydfceamfzwg.supabase.co"
-      - key: SUPABASE_DB_PASSWORD
+      - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
-      - key: SUPABASE_DB_DSN
-        sync: false
-      - key: SUPABASE_DB_HOST
-        sync: false
-      - key: SUPABASE_DB_PORT
-        value: "5432"
-      - key: SUPABASE_FORCE_IPV4
-        value: "1"
       - key: TEMPLINE_BASE_URL
         value: "https://smsbower.page/stubs/handler_api.php"
       - key: POLL_INTERVAL_SECONDS

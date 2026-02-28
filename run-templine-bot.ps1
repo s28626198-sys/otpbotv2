@@ -25,8 +25,8 @@ if (-not $env:SUPABASE_URL) {
     $env:SUPABASE_URL = "https://zpavyjdtbydfceamfzwg.supabase.co"
 }
 
-if (-not $env:SUPABASE_DB_PASSWORD) {
-    Write-Host "SUPABASE_DB_PASSWORD is not set. Please set it before running." -ForegroundColor Red
+if (-not $env:SUPABASE_SERVICE_ROLE_KEY) {
+    Write-Host "SUPABASE_SERVICE_ROLE_KEY is not set. Please set it before running." -ForegroundColor Red
     exit 1
 }
 
