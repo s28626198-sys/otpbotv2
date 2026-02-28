@@ -672,6 +672,10 @@ async def safe_reply_markdown(message, text: str, reply_markup=None) -> None:
         await message.reply_text(plain, reply_markup=reply_markup)
 
 
+async def adb(fn, *args, **kwargs):
+    return await asyncio.to_thread(fn, *args, **kwargs)
+
+
 @dataclass
 class PriceOption:
     service_code: str
@@ -695,7 +699,7 @@ class PriceOption:
 class DB:
     def __init__(self, path: str):
         self.path = path
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.init()
 
     def conn(self) -> sqlite3.Connection:
@@ -943,7 +947,7 @@ class DB:
 class SupabaseDB:
     def __init__(self, dsn: str):
         self.dsn = dsn
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.init()
 
     def conn(self, autocommit: bool = True):
@@ -1533,7 +1537,7 @@ class SupabaseDB:
 
 class SupabaseRESTDB:
     def __init__(self):
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         if not SUPABASE_URL:
             raise SystemExit("SUPABASE_URL is required")
         if not SUPABASE_KEY:
@@ -2200,10 +2204,11 @@ async def ensure_user(update: Update, db: Any) -> Tuple[int, int, str, str, bool
         raise RuntimeError("missing user/chat")
     username = user.username or ""
     full_name = user.full_name or ""
-    old = db.get(user.id)
+    old = await adb(db.get, user.id)
     if old:
         forced_role = ROLE_ADMIN if user.id == ADMIN_USER_ID else None
-        row = db.upsert(
+        row = await adb(
+            db.upsert,
             user.id,
             chat.id,
             lang=None,
@@ -2214,7 +2219,8 @@ async def ensure_user(update: Update, db: Any) -> Tuple[int, int, str, str, bool
         return user.id, chat.id, lang_from_code(row.get("lang")), role_of(row), False
     lg = lang_from_code(user.language_code)
     initial_role = ROLE_ADMIN if user.id == ADMIN_USER_ID else ROLE_PENDING
-    row = db.upsert(
+    row = await adb(
+        db.upsert,
         user.id,
         chat.id,
         lg,
@@ -2319,8 +2325,9 @@ async def show_prices(query, context: ContextTypes.DEFAULT_TYPE, lang: str, serv
             continue
     opts = parse_prices(payload, service_code, name, countries, lang) if payload else []
     user_id = query.from_user.id if query and query.from_user else 0
-    role = role_of(db.get(user_id) if user_id else None)
-    profit_pct = db.get_profit_percent() if hasattr(db, "get_profit_percent") else Decimal("20")
+    user_row = await adb(db.get, user_id) if user_id else None
+    role = role_of(user_row)
+    profit_pct = await adb(db.get_profit_percent) if hasattr(db, "get_profit_percent") else Decimal("20")
     opts = apply_role_prices(opts, role, profit_pct)
     if not opts:
         await query.edit_message_text(f"⚠️ {md(tt(lang, 'prices_empty'))}", parse_mode=ParseMode.MARKDOWN_V2)
@@ -2339,17 +2346,17 @@ async def start_poll_task(app: Application, aid: str) -> None:
     async def run() -> None:
         while True:
             await asyncio.sleep(POLL_SECONDS)
-            act = db.get_activation(aid)
+            act = await adb(db.get_activation, aid)
             if not act:
                 break
             if act.get("status") != "active":
                 break
             created_at = int(act.get("created_at") or time.time())
             if int(time.time()) - created_at >= MAX_MONITOR_SECONDS:
-                db.set_activation_status(aid, "expired")
-                refund = db.refund_activation_if_needed(aid)
+                await adb(db.set_activation_status, aid, "expired")
+                refund = await adb(db.refund_activation_if_needed, aid)
                 if refund:
-                    user_row = db.get(int(act.get("user_id"))) or {}
+                    user_row = await adb(db.get, int(act.get("user_id"))) or {}
                     lang = lang_from_code(user_row.get("lang"))
                     await app.bot.send_message(
                         int(act.get("chat_id")),
@@ -2361,7 +2368,7 @@ async def start_poll_task(app: Application, aid: str) -> None:
 
             user_id = int(act.get("user_id"))
             chat_id = int(act.get("chat_id"))
-            user_row = db.get(user_id) or {}
+            user_row = await adb(db.get, user_id) or {}
             lang = lang_from_code(user_row.get("lang"))
             try:
                 st, val = parse_status(await api.call("getStatus", id=aid))
@@ -2388,11 +2395,11 @@ async def start_poll_task(app: Application, aid: str) -> None:
                     await api.call("setStatus", id=aid, status=6)
                 except Exception:
                     pass
-                db.set_activation_status(aid, "otp_received", otp)
+                await adb(db.set_activation_status, aid, "otp_received", otp)
                 break
             if st == "CANCEL":
-                db.set_activation_status(aid, "cancelled")
-                refund = db.refund_activation_if_needed(aid)
+                await adb(db.set_activation_status, aid, "cancelled")
+                refund = await adb(db.refund_activation_if_needed, aid)
                 txt = tt(lang, "cancelled")
                 if refund:
                     txt = f"{txt}\n{tt(lang, 'refund_done', amount=refund.get('amount'))}"
@@ -2404,8 +2411,8 @@ async def start_poll_task(app: Application, aid: str) -> None:
                 )
                 break
             if st == "ERROR":
-                db.set_activation_status(aid, "error")
-                refund = db.refund_activation_if_needed(aid)
+                await adb(db.set_activation_status, aid, "error")
+                refund = await adb(db.refund_activation_if_needed, aid)
                 txt = api_error(lang, val or "UNKNOWN")
                 if refund:
                     txt = f"{txt}\n{tt(lang, 'refund_done', amount=refund.get('amount'))}"
@@ -2476,7 +2483,7 @@ async def notify_admin_new_user(context: ContextTypes.DEFAULT_TYPE, row: Dict[st
             parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=approval_keyboard(uid),
         )
-        db.mark_approval_notified(uid)
+        await adb(db.mark_approval_notified, uid)
     except Exception as e:
         logger.warning("failed to notify admin for new user %s: %s", uid, e)
 
@@ -2484,7 +2491,7 @@ async def notify_admin_new_user(context: ContextTypes.DEFAULT_TYPE, row: Dict[st
 async def h_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     db = context.application.bot_data["db"]
     user_id, _, lang, role, is_new = await ensure_user(update, db)
-    row = db.get(user_id) or {}
+    row = await adb(db.get, user_id) or {}
     role = role_of(row) if row else role
     logger.info("Received /start from user_id=%s", update.effective_user.id if update.effective_user else None)
     if role == ROLE_PENDING and (is_new or not bool(row.get("approval_notified"))):
@@ -2507,7 +2514,8 @@ async def h_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def h_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     db = context.application.bot_data["db"]
     await ensure_user(update, db)
-    lang = lang_from_code((db.get(update.effective_user.id) or {}).get("lang"))
+    row = await adb(db.get, update.effective_user.id) or {}
+    lang = lang_from_code(row.get("lang"))
     await safe_reply_markdown(update.effective_message, md(tt(lang, "lang_pick")), reply_markup=lang_keyboard())
 
 
@@ -2520,8 +2528,8 @@ async def cb_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     lg = q.data.split(":", 1)[1] if ":" in q.data else "en"
     if lg not in LANGS:
         lg = "en"
-    db.set_lang(q.from_user.id, q.message.chat_id, lg)
-    row = db.get(q.from_user.id) or {}
+    await adb(db.set_lang, q.from_user.id, q.message.chat_id, lg)
+    row = await adb(db.get, q.from_user.id) or {}
     await q.message.reply_text(
         md(tt(lg, "lang_saved")),
         parse_mode=ParseMode.MARKDOWN_V2,
@@ -2599,7 +2607,7 @@ async def cb_service_page(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     await safe_answer_callback(q)
     db: DB = context.application.bot_data["db"]
-    row = db.get(q.from_user.id) or {}
+    row = await adb(db.get, q.from_user.id) or {}
     lang = lang_from_code(row.get("lang"))
     try:
         _, mode, p = q.data.split(":")
@@ -2622,7 +2630,7 @@ async def cb_service_select(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
     await safe_answer_callback(q)
     db = context.application.bot_data["db"]
-    row = db.get(q.from_user.id) or {}
+    row = await adb(db.get, q.from_user.id) or {}
     lang = lang_from_code(row.get("lang"))
     service_code = q.data.split(":", 1)[1] if ":" in q.data else ""
     if not service_code:
@@ -2645,7 +2653,7 @@ async def cb_price_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     await safe_answer_callback(q)
     db: DB = context.application.bot_data["db"]
-    row = db.get(q.from_user.id) or {}
+    row = await adb(db.get, q.from_user.id) or {}
     lang = lang_from_code(row.get("lang"))
     try:
         _, code, p = q.data.split(":")
@@ -2669,7 +2677,7 @@ async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await safe_answer_callback(q)
     db = context.application.bot_data["db"]
     api: TemplineAPI = context.application.bot_data["api"]
-    row = db.get(q.from_user.id) or {}
+    row = await adb(db.get, q.from_user.id) or {}
     lang = lang_from_code(row.get("lang"))
     role = role_of(row)
 
@@ -2689,7 +2697,7 @@ async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     base_cost = dec(opt.base_price or opt.price, "0")
     deducted = False
     if role in {ROLE_USER, ROLE_SUPER}:
-        bal = db.adjust_balance(q.from_user.id, -charge, require_non_negative=True)
+        bal = await adb(db.adjust_balance, q.from_user.id, -charge, require_non_negative=True)
         if bal is None:
             await safe_answer_callback(q, tt(lang, "insufficient_wallet"), show_alert=True)
             return
@@ -2699,17 +2707,18 @@ async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         payload = await api.call("getNumber", service=opt.service_code, country=opt.country_code, providerIds=opt.provider_id)
     except Exception:
         if deducted:
-            db.adjust_balance(q.from_user.id, charge)
+            await adb(db.adjust_balance, q.from_user.id, charge)
         await q.message.reply_text(md(tt(lang, "generic_fail")), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=main_menu(lang, role))
         return
     aid, phone, err = parse_number(payload)
     if err or not aid or not phone:
         if deducted:
-            db.adjust_balance(q.from_user.id, charge)
+            await adb(db.adjust_balance, q.from_user.id, charge)
         await q.message.reply_text(md(api_error(lang, err or "UNKNOWN")), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=main_menu(lang, role))
         return
 
-    db.add_activation(
+    await adb(
+        db.add_activation,
         q.from_user.id,
         q.message.chat_id,
         aid,
@@ -2720,7 +2729,7 @@ async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         base_price=base_cost,
         charged_price=charge if role in {ROLE_USER, ROLE_SUPER} else 0,
     )
-    db.set_activation(q.from_user.id, q.message.chat_id, aid, opt.service_code, opt.country_code, opt.provider_id, phone)
+    await adb(db.set_activation, q.from_user.id, q.message.chat_id, aid, opt.service_code, opt.country_code, opt.provider_id, phone)
 
     provider = opt.provider_name or tt(lang, "fallback_provider")
     countries = context.application.bot_data.get("country_cache", {}).get("items") or {}
@@ -2763,7 +2772,7 @@ async def cb_another(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await safe_answer_callback(q)
     db = context.application.bot_data["db"]
     api: TemplineAPI = context.application.bot_data["api"]
-    row = db.get(q.from_user.id) or {}
+    row = await adb(db.get, q.from_user.id) or {}
     lang = lang_from_code(row.get("lang"))
     role = role_of(row)
 
@@ -2790,7 +2799,7 @@ async def cb_another(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     base_cost = dec(opt.base_price or opt.price, "0") if opt else Decimal("0")
     deducted = False
     if role in {ROLE_USER, ROLE_SUPER}:
-        bal = db.adjust_balance(q.from_user.id, -charge, require_non_negative=True)
+        bal = await adb(db.adjust_balance, q.from_user.id, -charge, require_non_negative=True)
         if bal is None:
             await safe_answer_callback(q, tt(lang, "insufficient_wallet"), show_alert=True)
             return
@@ -2799,18 +2808,19 @@ async def cb_another(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         payload = await api.call("getNumber", service=service_code, country=country_code, providerIds=provider_id)
     except Exception:
         if deducted:
-            db.adjust_balance(q.from_user.id, charge)
+            await adb(db.adjust_balance, q.from_user.id, charge)
         await q.message.reply_text(md(tt(lang, "generic_fail")), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=main_menu(lang, role))
         return
 
     aid, phone, err = parse_number(payload)
     if err or not aid or not phone:
         if deducted:
-            db.adjust_balance(q.from_user.id, charge)
+            await adb(db.adjust_balance, q.from_user.id, charge)
         await q.message.reply_text(md(api_error(lang, err or "UNKNOWN")), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=main_menu(lang, role))
         return
 
-    db.add_activation(
+    await adb(
+        db.add_activation,
         q.from_user.id,
         q.message.chat_id,
         aid,
@@ -2821,7 +2831,7 @@ async def cb_another(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         base_price=base_cost,
         charged_price=charge if role in {ROLE_USER, ROLE_SUPER} else 0,
     )
-    db.set_activation(q.from_user.id, q.message.chat_id, aid, service_code, country_code, provider_id, phone)
+    await adb(db.set_activation, q.from_user.id, q.message.chat_id, aid, service_code, country_code, provider_id, phone)
 
     countries = context.application.bot_data.get("country_cache", {}).get("items") or {}
     cinfo = countries.get(str(country_code), {}) if isinstance(countries, dict) else {}
@@ -2848,7 +2858,7 @@ async def h_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     db = context.application.bot_data["db"]
     _, _, lang, role, _ = await ensure_user(update, db)
     if role in {ROLE_USER, ROLE_SUPER}:
-        bal = money(db.get_balance(update.effective_user.id))
+        bal = money(await adb(db.get_balance, update.effective_user.id))
         await update.effective_message.reply_text(
             md(tt(lang, "wallet", balance=bal)),
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -2877,11 +2887,11 @@ async def cb_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     await safe_answer_callback(q)
     db = context.application.bot_data["db"]
-    row = db.get(q.from_user.id) or {}
+    row = await adb(db.get, q.from_user.id) or {}
     lang = lang_from_code(row.get("lang"))
     role = role_of(row)
     if role in {ROLE_USER, ROLE_SUPER}:
-        bal = money(db.get_balance(q.from_user.id))
+        bal = money(await adb(db.get_balance, q.from_user.id))
         await q.message.reply_text(
             md(tt(lang, "wallet", balance=bal)),
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -2912,12 +2922,12 @@ async def cancel_core(context: ContextTypes.DEFAULT_TYPE, aid: str, user_id: Opt
     if tsk and not tsk.done():
         tsk.cancel()
         tasks.pop(str(aid), None)
-    db.set_activation_status(str(aid), "cancelled")
-    refund = db.refund_activation_if_needed(str(aid))
+    await adb(db.set_activation_status, str(aid), "cancelled")
+    refund = await adb(db.refund_activation_if_needed, str(aid))
     if user_id is not None:
-        row = db.get(user_id) or {}
+        row = await adb(db.get, user_id) or {}
         if str(row.get("activation_id") or "") == str(aid):
-            db.clear_activation(user_id)
+            await adb(db.clear_activation, user_id)
         if refund and int(refund.get("user_id") or 0) == int(user_id):
             lang = lang_from_code(row.get("lang"))
             try:
@@ -2936,14 +2946,14 @@ async def cb_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not q or not q.from_user:
         return
     db = context.application.bot_data["db"]
-    row = db.get(q.from_user.id) or {}
+    row = await adb(db.get, q.from_user.id) or {}
     lang = lang_from_code(row.get("lang"))
     aid = q.data.split(":", 1)[1] if ":" in q.data else None
     if not aid:
         await safe_answer_callback(q, tt(lang, "expired"), show_alert=True)
         return
 
-    act = db.get_activation(str(aid))
+    act = await adb(db.get_activation, str(aid))
     if not act:
         legacy_aid = row.get("activation_id")
         if str(legacy_aid or "") == str(aid) and int(row.get("polling") or 0) == 1:
@@ -2987,9 +2997,9 @@ async def cb_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     db = context.application.bot_data["db"]
     _, _, lang, role, _ = await ensure_user(update, db)
-    act = db.latest_active_activation_for_user(update.effective_user.id)
+    act = await adb(db.latest_active_activation_for_user, update.effective_user.id)
     if not act:
-        row = db.get(update.effective_user.id) or {}
+        row = await adb(db.get, update.effective_user.id) or {}
         aid = row.get("activation_id")
         if aid and int(row.get("polling") or 0) == 1:
             act = {
@@ -3029,7 +3039,7 @@ async def cb_home(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await safe_answer_callback(q)
     db = context.application.bot_data["db"]
-    row = db.get(q.from_user.id) or {}
+    row = await adb(db.get, q.from_user.id) or {}
     lang = lang_from_code(row.get("lang"))
     await q.message.reply_text(
         md(tt(lang, "welcome")),
@@ -3097,7 +3107,7 @@ async def gate_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not update.effective_user or not update.effective_message:
         return
     db = context.application.bot_data["db"]
-    row = db.get(update.effective_user.id)
+    row = await adb(db.get, update.effective_user.id)
     if not row:
         txt = update.effective_message.text or ""
         if txt.startswith("/start") or txt.startswith("/language"):
@@ -3124,7 +3134,7 @@ async def gate_user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     logger.info("Incoming callback from user_id=%s data=%s", q.from_user.id, q.data)
     db = context.application.bot_data["db"]
-    row = db.get(q.from_user.id)
+    row = await adb(db.get, q.from_user.id)
     if not row:
         return
     role = role_of(row)
@@ -3155,9 +3165,9 @@ async def cb_user_approval(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await safe_answer_callback(q, tt("en", "expired"), show_alert=True)
         return
     db = context.application.bot_data["db"]
-    db.set_role(uid, role, approved_by=q.from_user.id)
+    await adb(db.set_role, uid, role, approved_by=q.from_user.id)
     await safe_answer_callback(q, tt("en", "role_updated"))
-    target = db.get(uid) or {}
+    target = await adb(db.get, uid) or {}
     chat_id = target.get("chat_id")
     if chat_id:
         msg_key = "approved_user" if role == ROLE_USER else "approved_super"
@@ -3181,7 +3191,7 @@ async def h_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     if not is_admin(update):
         db = context.application.bot_data["db"]
-        row = db.get(update.effective_user.id) or {}
+        row = await adb(db.get, update.effective_user.id) or {}
         lang = lang_from_code(row.get("lang"))
         await update.effective_message.reply_text(md(tt(lang, "admin_only")), parse_mode=ParseMode.MARKDOWN_V2)
         return
@@ -3203,7 +3213,7 @@ async def cb_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     action = (q.data or "").split(":", 1)[1] if ":" in (q.data or "") else ""
     await safe_answer_callback(q)
     if action == "pending":
-        items = db.list_pending_users()
+        items = await adb(db.list_pending_users)
         if not items:
             await q.message.reply_text(md(tt("en", "pending_none")), parse_mode=ParseMode.MARKDOWN_V2)
             return
@@ -3218,19 +3228,19 @@ async def cb_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     if action == "payments":
         context.user_data["admin_state"] = PAYMENT_EDIT_STATE
-        settings = db.get_payment_settings()
+        settings = await adb(db.get_payment_settings)
         lines = payment_settings_to_lines(settings)
         await q.message.reply_text(md(tt("en", "payment_show", lines=lines)), parse_mode=ParseMode.MARKDOWN_V2)
         await q.message.reply_text(md(tt("en", "payment_prompt")), parse_mode=ParseMode.MARKDOWN_V2)
         return
     if action == "profit":
         context.user_data["admin_state"] = PROFIT_EDIT_STATE
-        pct = money(db.get_profit_percent())
+        pct = money(await adb(db.get_profit_percent))
         await q.message.reply_text(md(tt("en", "profit_current", pct=pct)), parse_mode=ParseMode.MARKDOWN_V2)
         await q.message.reply_text(md(tt("en", "profit_prompt")), parse_mode=ParseMode.MARKDOWN_V2)
         return
     if action == "stats":
-        s = db.user_stats()
+        s = await adb(db.user_stats)
         text = (
             f"📊 Users\n"
             f"Total: {s.get('total', 0)}\n"
@@ -3258,17 +3268,17 @@ async def cb_deposit_review(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await safe_answer_callback(q, tt("en", "expired"), show_alert=True)
         return
     db = context.application.bot_data["db"]
-    dep = db.get_deposit(dep_id)
+    dep = await adb(db.get_deposit, dep_id)
     if not dep:
         await safe_answer_callback(q, tt("en", "deposit_not_found"), show_alert=True)
         return
     status = "approved" if action == "ap" else "rejected"
-    ok = db.update_deposit_status(dep_id, status, q.from_user.id)
+    ok = await adb(db.update_deposit_status, dep_id, status, q.from_user.id)
     if not ok:
         await safe_answer_callback(q, tt("en", "deposit_not_found"), show_alert=True)
         return
     await safe_answer_callback(q, tt("en", "deposit_reviewed"))
-    usr = db.get(int(dep["user_id"])) or {}
+    usr = await adb(db.get, int(dep["user_id"])) or {}
     lang = lang_from_code(usr.get("lang"))
     key = "deposit_approved_user" if status == "approved" else "deposit_rejected_user"
     try:
@@ -3288,7 +3298,7 @@ async def cb_deposit_review(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def h_deposit_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     db = context.application.bot_data["db"]
-    row = db.get(update.effective_user.id) or {}
+    row = await adb(db.get, update.effective_user.id) or {}
     role = role_of(row)
     lang = lang_from_code(row.get("lang"))
     if role not in {ROLE_USER, ROLE_SUPER}:
@@ -3306,13 +3316,13 @@ async def h_photo_state(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not update.effective_user or not update.effective_message:
         return
     db = context.application.bot_data["db"]
-    row = db.get(update.effective_user.id) or {}
+    row = await adb(db.get, update.effective_user.id) or {}
     role = role_of(row)
     lang = lang_from_code(row.get("lang"))
     dep_state = context.user_data.get("dep_state")
     dep_id = context.user_data.get("dep_id")
     if dep_state != DEPOSIT_PROOF_STATE or not dep_id:
-        open_dep = db.latest_open_deposit_for_user(update.effective_user.id)
+        open_dep = await adb(db.latest_open_deposit_for_user, update.effective_user.id)
         if not open_dep:
             return
         dep_id = int(open_dep["id"])
@@ -3330,8 +3340,8 @@ async def h_photo_state(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.effective_message.reply_text(md(tt(lang, "deposit_waiting_photo")), parse_mode=ParseMode.MARKDOWN_V2)
         return
     file_id = photos[-1].file_id
-    db.set_deposit_proof(int(dep_id), txid, file_id)
-    dep = db.get_deposit(int(dep_id)) or {}
+    await adb(db.set_deposit_proof, int(dep_id), txid, file_id)
+    dep = await adb(db.get_deposit, int(dep_id)) or {}
     _clear_deposit_state(context)
     await update.effective_message.reply_text(
         md(tt(lang, "deposit_sent")),
@@ -3359,7 +3369,7 @@ async def process_text_state(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not update.effective_user or not update.effective_message:
         return False
     db = context.application.bot_data["db"]
-    row = db.get(update.effective_user.id) or {}
+    row = await adb(db.get, update.effective_user.id) or {}
     role = role_of(row)
     lang = lang_from_code(row.get("lang"))
     text = (update.effective_message.text or "").strip()
@@ -3368,7 +3378,7 @@ async def process_text_state(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     admin_state = context.user_data.get("admin_state")
     if update.effective_user.id == ADMIN_USER_ID and admin_state == BROADCAST_STATE:
-        users = db.list_all_users(include_blocked=False)
+        users = await adb(db.list_all_users, include_blocked=False)
         ok = 0
         total = 0
         for u in users:
@@ -3392,14 +3402,14 @@ async def process_text_state(update: Update, context: ContextTypes.DEFAULT_TYPE)
             k, v = line.split("=", 1)
             parsed[k.strip()] = v.strip()
         if parsed:
-            db.update_payment_settings(parsed)
+            await adb(db.update_payment_settings, parsed)
             await update.effective_message.reply_text(md(tt("en", "payment_saved")), parse_mode=ParseMode.MARKDOWN_V2)
         _clear_admin_state(context)
         return True
     if update.effective_user.id == ADMIN_USER_ID and admin_state == PROFIT_EDIT_STATE:
         try:
             pct = dec(text)
-            db.set_profit_percent(pct)
+            await adb(db.set_profit_percent, pct)
             await update.effective_message.reply_text(md(tt("en", "profit_saved", pct=money(pct))), parse_mode=ParseMode.MARKDOWN_V2)
         except Exception:
             await update.effective_message.reply_text(md(tt("en", "generic_fail")), parse_mode=ParseMode.MARKDOWN_V2)
@@ -3408,7 +3418,7 @@ async def process_text_state(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     dep_state = context.user_data.get("dep_state")
     if dep_state != DEPOSIT_AMOUNT_STATE and dep_state != DEPOSIT_PROOF_STATE:
-        open_dep = db.latest_open_deposit_for_user(update.effective_user.id)
+        open_dep = await adb(db.latest_open_deposit_for_user, update.effective_user.id)
         if open_dep:
             dep_state = DEPOSIT_PROOF_STATE
             context.user_data["dep_state"] = DEPOSIT_PROOF_STATE
@@ -3418,13 +3428,13 @@ async def process_text_state(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if amount < MIN_DEPOSIT_USD:
             await update.effective_message.reply_text(md(tt(lang, "deposit_min", min=money(MIN_DEPOSIT_USD))), parse_mode=ParseMode.MARKDOWN_V2)
             return True
-        dep_id = db.create_deposit(update.effective_user.id, amount)
+        dep_id = await adb(db.create_deposit, update.effective_user.id, amount)
         context.user_data["dep_state"] = DEPOSIT_PROOF_STATE
         context.user_data["dep_id"] = dep_id
         context.user_data["dep_amount"] = money(amount)
-        pay = db.get_payment_settings()
+        pay = await adb(db.get_payment_settings)
         if not pay.get("telegram_username"):
-            admin_row = db.get(ADMIN_USER_ID) or {}
+            admin_row = await adb(db.get, ADMIN_USER_ID) or {}
             admin_un = str(admin_row.get("username") or "").strip()
             if admin_un:
                 pay["telegram_username"] = f"@{admin_un}" if not admin_un.startswith("@") else admin_un
@@ -3463,7 +3473,7 @@ async def log_raw_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def post_init(app: Application) -> None:
     logger.info("Templine bot post-init started (admin_user_id=%s)", ADMIN_USER_ID)
     db = app.bot_data["db"]
-    db.ensure_admin_user(ADMIN_USER_ID)
+    await adb(db.ensure_admin_user, ADMIN_USER_ID)
     await app.bot.set_my_commands(
         [
             BotCommand("start", "Start"),
@@ -3494,7 +3504,7 @@ async def post_init(app: Application) -> None:
     except Exception as e:
         logger.warning("cache warm-up failed: %s", e)
 
-    for row in db.list_active_activations():
+    for row in await adb(db.list_active_activations):
         try:
             await start_poll_task(app, str(row["activation_id"]))
         except Exception as e:
