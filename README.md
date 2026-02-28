@@ -497,7 +497,7 @@ This keeps existing bot flows unchanged while making deployment production-ready
 ### E) Supabase One-Time Setup
 
 1. Open Supabase Dashboard -> SQL Editor.
-2. Run [`supabase_schema.sql`](./supabase_schema.sql) once.
+2. Run [`supabase_schema.sql`](./supabase_schema.sql) once (or re-run to apply RLS disable changes).
 3. Deploy/redeploy Render service.
 
 Use `Secret/Service Role` key only. `Publishable/Anon` key will fail for server writes.

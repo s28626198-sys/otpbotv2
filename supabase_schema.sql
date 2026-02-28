@@ -62,7 +62,7 @@ create index if not exists idx_users_role on public.users(role);
 create index if not exists idx_activations_user_status on public.activations(user_id, status);
 create index if not exists idx_deposits_status on public.deposits(status);
 
-alter table public.users enable row level security;
-alter table public.activations enable row level security;
-alter table public.deposits enable row level security;
-alter table public.settings enable row level security;
+alter table public.users disable row level security;
+alter table public.activations disable row level security;
+alter table public.deposits disable row level security;
+alter table public.settings disable row level security;

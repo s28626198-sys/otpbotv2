@@ -1,5 +1,6 @@
 import asyncio
 import atexit
+import base64
 import json
 import logging
 import os
@@ -466,6 +467,21 @@ def payment_settings_to_lines(settings: Dict[str, Any]) -> str:
     ordered = [k for k in pref if k in settings] + [k for k in keys if k not in pref]
     lines = [f"{k}: {settings.get(k) or '-'}" for k in ordered]
     return "\n".join(lines)
+
+
+def jwt_role(token: str) -> Optional[str]:
+    try:
+        parts = token.split(".")
+        if len(parts) < 2:
+            return None
+        payload = parts[1]
+        padding = "=" * (-len(payload) % 4)
+        raw = base64.urlsafe_b64decode(payload + padding).decode("utf-8")
+        obj = json.loads(raw)
+        role = obj.get("role")
+        return str(role) if role is not None else None
+    except Exception:
+        return None
 
 
 def tt(lang: str, key: str, **kw: Any) -> str:
@@ -1522,6 +1538,12 @@ class SupabaseRESTDB:
             raise SystemExit("SUPABASE_URL is required")
         if not SUPABASE_KEY:
             raise SystemExit("SUPABASE_SERVICE_ROLE_KEY or SUPABASE_KEY or SUPABASE_SECRET_KEY is required")
+        role = jwt_role(SUPABASE_KEY)
+        if role and role != "service_role":
+            raise SystemExit(
+                "Supabase key role is not service_role. "
+                "Use Secret/Service Role key (not Publishable/Anon key)."
+            )
         self.sb = create_client(SUPABASE_URL, SUPABASE_KEY)
         self.init()
 
@@ -1553,8 +1575,17 @@ class SupabaseRESTDB:
 
     def init(self) -> None:
         self._require_schema()
-        self.set_setting("profit_percent", self.get_setting("profit_percent", "20") or "20")
-        self.set_setting("payment_methods", self.get_setting("payment_methods", "{}") or "{}")
+        try:
+            self.set_setting("profit_percent", self.get_setting("profit_percent", "20") or "20")
+            self.set_setting("payment_methods", self.get_setting("payment_methods", "{}") or "{}")
+        except Exception as e:
+            msg = str(e)
+            if "row-level security policy" in msg.lower() or "42501" in msg:
+                raise SystemExit(
+                    "Supabase RLS denied access. Use Service Role key and run updated supabase_schema.sql "
+                    "(RLS disabled for bot tables)."
+                )
+            raise
         self.ensure_admin_user(ADMIN_USER_ID)
 
     def get(self, user_id: int) -> Optional[Dict[str, Any]]:
