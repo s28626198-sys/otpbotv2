@@ -90,6 +90,11 @@ SUPABASE_DB_HOSTADDR = os.getenv("SUPABASE_DB_HOSTADDR", "").strip()
 SUPABASE_FORCE_IPV4 = os.getenv("SUPABASE_FORCE_IPV4", "1").strip().lower() in {"1", "true", "yes", "on"}
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "").strip()
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+SUPABASE_KEY = (
+    SUPABASE_SERVICE_ROLE_KEY
+    or os.getenv("SUPABASE_KEY", "").strip()
+    or os.getenv("SUPABASE_SECRET_KEY", "").strip()
+)
 
 ROLE_ADMIN = "admin"
 ROLE_USER = "user"
@@ -1515,9 +1520,9 @@ class SupabaseRESTDB:
         self.lock = threading.Lock()
         if not SUPABASE_URL:
             raise SystemExit("SUPABASE_URL is required")
-        if not SUPABASE_SERVICE_ROLE_KEY:
-            raise SystemExit("SUPABASE_SERVICE_ROLE_KEY is required")
-        self.sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+        if not SUPABASE_KEY:
+            raise SystemExit("SUPABASE_SERVICE_ROLE_KEY or SUPABASE_KEY or SUPABASE_SECRET_KEY is required")
+        self.sb = create_client(SUPABASE_URL, SUPABASE_KEY)
         self.init()
 
     @staticmethod
@@ -3611,8 +3616,8 @@ def main() -> None:
         raise SystemExit("TEMPLINE_API_KEY/SMSBOWER_API_KEY missing (.env or environment variable required)")
     if not SUPABASE_URL:
         raise SystemExit("SUPABASE_URL missing (.env or environment variable required)")
-    if not SUPABASE_SERVICE_ROLE_KEY:
-        raise SystemExit("SUPABASE_SERVICE_ROLE_KEY missing (.env or environment variable required)")
+    if not SUPABASE_KEY:
+        raise SystemExit("SUPABASE_SERVICE_ROLE_KEY বা SUPABASE_KEY বা SUPABASE_SECRET_KEY missing")
     if "YOUR_REAL_SMSBOWER_API_KEY" in API_KEY:
         raise SystemExit("SMSBOWER API key is placeholder. Set real API key.")
     validate_telegram_token(BOT_TOKEN)

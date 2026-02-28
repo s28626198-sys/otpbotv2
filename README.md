@@ -422,6 +422,8 @@ TEMPLINE_API_KEY=your_templine_api_key
 TEMPLINE_BASE_URL=https://smsbower.page/stubs/handler_api.php
 SUPABASE_URL=https://your-project-ref.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=your_supabase_service_role_key
+# OR
+SUPABASE_KEY=your_supabase_secret_or_service_key
 ADMIN_USER_ID=5742928021
 POLL_INTERVAL_SECONDS=4
 ```
@@ -470,6 +472,7 @@ Set these in Render (or via `render.yaml` where marked `sync: false`):
 - `BOT_TOKEN`
 - `TEMPLINE_API_KEY`
 - `SUPABASE_SERVICE_ROLE_KEY`
+  - or `SUPABASE_KEY`
 
 Already prefilled in `render.yaml`:
 
@@ -496,3 +499,5 @@ This keeps existing bot flows unchanged while making deployment production-ready
 1. Open Supabase Dashboard -> SQL Editor.
 2. Run [`supabase_schema.sql`](./supabase_schema.sql) once.
 3. Deploy/redeploy Render service.
+
+Use `Secret/Service Role` key only. `Publishable/Anon` key will fail for server writes.

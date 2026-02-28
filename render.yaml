@@ -15,6 +15,8 @@ services:
         value: "https://zpavyjdtbydfceamfzwg.supabase.co"
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
+      - key: SUPABASE_KEY
+        sync: false
       - key: TEMPLINE_BASE_URL
         value: "https://smsbower.page/stubs/handler_api.php"
       - key: POLL_INTERVAL_SECONDS
