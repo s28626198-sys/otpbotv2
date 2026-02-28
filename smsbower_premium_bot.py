@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import sqlite3
+import socket
 import threading
 import time
 from pathlib import Path
@@ -84,6 +85,10 @@ SUPABASE_DB_USER = os.getenv("SUPABASE_DB_USER", "postgres").strip()
 SUPABASE_DB_NAME = os.getenv("SUPABASE_DB_NAME", "postgres").strip()
 SUPABASE_DB_PORT = int(os.getenv("SUPABASE_DB_PORT", "5432"))
 SUPABASE_DB_HOST = os.getenv("SUPABASE_DB_HOST", "").strip()
+SUPABASE_DB_DSN = os.getenv("SUPABASE_DB_DSN", "").strip()
+SUPABASE_DB_SSLMODE = os.getenv("SUPABASE_DB_SSLMODE", "require").strip() or "require"
+SUPABASE_DB_HOSTADDR = os.getenv("SUPABASE_DB_HOSTADDR", "").strip()
+SUPABASE_FORCE_IPV4 = os.getenv("SUPABASE_FORCE_IPV4", "1").strip().lower() in {"1", "true", "yes", "on"}
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "").strip()
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 
@@ -405,6 +410,8 @@ def is_approved_role(role: str) -> bool:
 
 
 def build_supabase_pg_dsn() -> str:
+    if SUPABASE_DB_DSN:
+        return SUPABASE_DB_DSN
     if not SUPABASE_DB_PASSWORD:
         raise SystemExit("SUPABASE_DB_PASSWORD is required")
     host = SUPABASE_DB_HOST
@@ -416,10 +423,26 @@ def build_supabase_pg_dsn() -> str:
         if not ref:
             raise SystemExit("Invalid SUPABASE_URL")
         host = f"db.{ref}.supabase.co"
-    return (
-        f"host={host} port={SUPABASE_DB_PORT} dbname={SUPABASE_DB_NAME} "
-        f"user={SUPABASE_DB_USER} password={SUPABASE_DB_PASSWORD} sslmode=require"
-    )
+    hostaddr = SUPABASE_DB_HOSTADDR
+    if not hostaddr and SUPABASE_FORCE_IPV4:
+        try:
+            infos = socket.getaddrinfo(host, SUPABASE_DB_PORT, socket.AF_INET, socket.SOCK_STREAM)
+            if infos:
+                hostaddr = infos[0][4][0]
+        except Exception:
+            hostaddr = ""
+
+    parts = [
+        f"host={host}",
+        f"port={SUPABASE_DB_PORT}",
+        f"dbname={SUPABASE_DB_NAME}",
+        f"user={SUPABASE_DB_USER}",
+        f"password={SUPABASE_DB_PASSWORD}",
+        f"sslmode={SUPABASE_DB_SSLMODE}",
+    ]
+    if hostaddr:
+        parts.append(f"hostaddr={hostaddr}")
+    return " ".join(parts)
 
 
 def profit_percent_from_settings(s: Dict[str, Any]) -> Decimal:
@@ -3269,10 +3292,11 @@ def main() -> None:
         raise SystemExit("BOT_TOKEN missing (.env or environment variable required)")
     if not API_KEY:
         raise SystemExit("TEMPLINE_API_KEY/SMSBOWER_API_KEY missing (.env or environment variable required)")
-    if not SUPABASE_DB_PASSWORD:
-        raise SystemExit("SUPABASE_DB_PASSWORD missing (.env or environment variable required)")
-    if not SUPABASE_URL and not SUPABASE_DB_HOST:
-        raise SystemExit("SUPABASE_URL or SUPABASE_DB_HOST is required")
+    if not SUPABASE_DB_DSN:
+        if not SUPABASE_DB_PASSWORD:
+            raise SystemExit("SUPABASE_DB_PASSWORD missing (.env or environment variable required)")
+        if not SUPABASE_URL and not SUPABASE_DB_HOST:
+            raise SystemExit("SUPABASE_URL or SUPABASE_DB_HOST is required")
     if "YOUR_REAL_SMSBOWER_API_KEY" in API_KEY:
         raise SystemExit("SMSBOWER API key is placeholder. Set real API key.")
     validate_telegram_token(BOT_TOKEN)
@@ -3293,10 +3317,11 @@ def main() -> None:
         pass
 
     logger.info(
-        "Startup config: ADMIN_USER_ID=%s | BASE_URL=%s | SUPABASE_URL=%s",
+        "Startup config: ADMIN_USER_ID=%s | BASE_URL=%s | SUPABASE=%s | FORCE_IPV4=%s",
         ADMIN_USER_ID,
         BASE_URL,
-        SUPABASE_URL or SUPABASE_DB_HOST,
+        ("DSN" if SUPABASE_DB_DSN else (SUPABASE_URL or SUPABASE_DB_HOST)),
+        SUPABASE_FORCE_IPV4,
     )
     app = build_app()
     logger.info("Templine bot boot complete. Role-based mode enabled. Admin user_id=%s", ADMIN_USER_ID)

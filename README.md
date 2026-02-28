@@ -469,6 +469,10 @@ Set these in Render (or via `render.yaml` where marked `sync: false`):
 - `BOT_TOKEN`
 - `TEMPLINE_API_KEY`
 - `SUPABASE_DB_PASSWORD`
+- `SUPABASE_DB_DSN` (optional, recommended; full Postgres DSN)
+- `SUPABASE_DB_HOST` (optional override)
+- `SUPABASE_DB_PORT` (default `5432`; Supabase pooler often uses `6543`)
+- `SUPABASE_FORCE_IPV4` (recommended `1` on Render)
 
 Already prefilled in `render.yaml`:
 
@@ -489,3 +493,12 @@ Already prefilled in `render.yaml`:
 - Bot runs webhook mode on Render web service port (`PORT`)
 
 This keeps existing bot flows unchanged while making deployment production-ready.
+
+### IPv6 / Supabase Connectivity Note
+
+If deploy logs show `Network is unreachable` for Supabase host:
+
+1. Set `SUPABASE_FORCE_IPV4=1` (already default in `render.yaml`).
+2. Prefer Supabase pooler connection by setting either:
+   - `SUPABASE_DB_DSN` from Supabase Dashboard, or
+   - `SUPABASE_DB_HOST` to pooler host + `SUPABASE_DB_PORT` (often `6543`).
