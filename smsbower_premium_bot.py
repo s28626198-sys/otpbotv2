@@ -234,7 +234,7 @@ TR["en"].update(
         "approve_user": "✅ Approve User",
         "approve_super": "⚡ Approve Super",
         "approve_cancel": "🚫 Cancel",
-        "new_user_alert": "🆕 New user request\n👤 {name}\n🆔 {user_id}\n🌐 {lang}",
+        "new_user_alert": "🆕 New user request\n👤 {name}\n🆔 {user_id}\n🌐 {user_lang}",
         "broadcast_prompt": "📣 Send the broadcast message now.",
         "broadcast_done": "✅ Broadcast sent to {ok}/{total}.",
         "payment_show": "💳 Payment Settings\n\n{lines}",
@@ -2476,7 +2476,7 @@ async def notify_admin_new_user(context: ContextTypes.DEFAULT_TYPE, row: Dict[st
     uid = int(row["user_id"])
     name = row.get("full_name") or row.get("username") or f"user_{uid}"
     lang = row.get("lang") or "en"
-    text = tt("en", "new_user_alert", name=name, user_id=uid, lang=lang)
+    text = tt("en", "new_user_alert", name=name, user_id=uid, user_lang=lang)
     try:
         await context.bot.send_message(
             ADMIN_USER_ID,
@@ -3220,7 +3220,7 @@ async def cb_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
         for r in items[:20]:
             name = r.get("full_name") or r.get("username") or f"user_{r['user_id']}"
-            txt = tt("en", "new_user_alert", name=name, user_id=r["user_id"], lang=r.get("lang") or "en")
+            txt = tt("en", "new_user_alert", name=name, user_id=r["user_id"], user_lang=r.get("lang") or "en")
             await q.message.reply_text(md(txt), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=approval_keyboard(int(r["user_id"])))
         return
     if action == "broadcast":
