@@ -18,7 +18,7 @@ services:
       - key: SUPABASE_KEY
         sync: false
       - key: TEMPLINE_BASE_URL
-        value: "https://smsbower.page/stubs/handler_api.php"
+        value: "https://smsbower.app/web/stubs/handler_api.php"
       - key: POLL_INTERVAL_SECONDS
         value: "4"
       - key: CANCEL_LOCK_SECONDS

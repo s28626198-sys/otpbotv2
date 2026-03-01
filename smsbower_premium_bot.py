@@ -64,7 +64,7 @@ except Exception:
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 API_KEY = os.getenv("TEMPLINE_API_KEY", os.getenv("SMSBOWER_API_KEY", ""))
-BASE_URL = os.getenv("TEMPLINE_BASE_URL", os.getenv("SMSBOWER_BASE_URL", "https://smsbower.page/stubs/handler_api.php"))
+BASE_URL = os.getenv("TEMPLINE_BASE_URL", os.getenv("SMSBOWER_BASE_URL", "https://smsbower.app/web/stubs/handler_api.php"))
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "5742928021"))
 POLL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "4"))
 SEARCH_STATE = 1
@@ -1873,7 +1873,33 @@ class TemplineAPI:
     def __init__(self, api_key: str, base_url: str):
         self.key = api_key
         self.base = base_url
-        self.http = httpx.AsyncClient(timeout=15, follow_redirects=True)
+        self.base_urls = self._build_base_urls(base_url)
+        self.http = httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=6.0), follow_redirects=True)
+
+    @staticmethod
+    def _build_base_urls(primary: str) -> List[str]:
+        out: List[str] = []
+
+        def add(url: Optional[str]) -> None:
+            u = str(url or "").strip()
+            if not u or u in out:
+                return
+            out.append(u)
+
+        add(primary)
+        if "smsbower.page/stubs/handler_api.php" in primary:
+            add(primary.replace("https://smsbower.page/stubs/handler_api.php", "https://smsbower.app/web/stubs/handler_api.php"))
+        elif "smsbower.app/web/stubs/handler_api.php" in primary:
+            add(primary.replace("https://smsbower.app/web/stubs/handler_api.php", "https://smsbower.page/stubs/handler_api.php"))
+        else:
+            add("https://smsbower.app/web/stubs/handler_api.php")
+            add("https://smsbower.page/stubs/handler_api.php")
+
+        extras = os.getenv("TEMPLINE_FALLBACK_BASE_URLS", "").strip()
+        if extras:
+            for x in extras.split(","):
+                add(x)
+        return out
 
     async def close(self) -> None:
         await self.http.aclose()
@@ -1882,14 +1908,16 @@ class TemplineAPI:
         params = {"api_key": self.key, "action": action}
         params.update({k: v for k, v in kwargs.items() if v is not None and v != ""})
         last = None
-        for _ in range(3):
-            try:
-                r = await self.http.get(self.base, params=params)
-                r.raise_for_status()
-                return json_maybe(r.text.strip())
-            except Exception as e:
-                last = e
-                await asyncio.sleep(0.5)
+        for base in self.base_urls:
+            for _ in range(2):
+                try:
+                    r = await self.http.get(base, params=params)
+                    r.raise_for_status()
+                    return json_maybe(r.text.strip())
+                except Exception as e:
+                    last = e
+                    await asyncio.sleep(0.35)
+            logger.warning("API endpoint failed for action=%s url=%s err=%s", action, base, last)
         raise RuntimeError(f"request failed: {last}")
 
 
@@ -2705,8 +2733,16 @@ async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         deducted = True
     await q.edit_message_text(md(tt(lang, "wait")), parse_mode=ParseMode.MARKDOWN_V2)
     try:
-        payload = await api.call("getNumber", service=opt.service_code, country=opt.country_code, providerIds=opt.provider_id)
-    except Exception:
+        buy_args: Dict[str, Any] = {
+            "service": opt.service_code,
+            "country": opt.country_code,
+            "providerIds": opt.provider_id,
+        }
+        if base_cost > 0:
+            buy_args["fixPrice"] = money(base_cost)
+        payload = await api.call("getNumber", **buy_args)
+    except Exception as e:
+        logger.warning("getNumber failed (buy) user=%s args=%s err=%s", q.from_user.id, buy_args, e)
         if deducted:
             await adb(db.adjust_balance, q.from_user.id, charge)
         await q.message.reply_text(md(tt(lang, "generic_fail")), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=main_menu(lang, role))
@@ -2806,8 +2842,16 @@ async def cb_another(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             return
         deducted = True
     try:
-        payload = await api.call("getNumber", service=service_code, country=country_code, providerIds=provider_id)
-    except Exception:
+        buy_args: Dict[str, Any] = {
+            "service": service_code,
+            "country": country_code,
+            "providerIds": provider_id,
+        }
+        if base_cost > 0:
+            buy_args["fixPrice"] = money(base_cost)
+        payload = await api.call("getNumber", **buy_args)
+    except Exception as e:
+        logger.warning("getNumber failed (another) user=%s args=%s err=%s", q.from_user.id, buy_args, e)
         if deducted:
             await adb(db.adjust_balance, q.from_user.id, charge)
         await q.message.reply_text(md(tt(lang, "generic_fail")), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=main_menu(lang, role))
