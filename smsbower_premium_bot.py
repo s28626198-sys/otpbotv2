@@ -23,6 +23,7 @@ from telegram import (
     ForceReply,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
     ReplyKeyboardMarkup,
     Update,
 )
@@ -60,6 +61,105 @@ try:
 except Exception:
     CopyTextButton = None
     HAS_COPY = False
+
+
+def _detect_button_style(text: str, callback_data: Optional[str] = None) -> Optional[str]:
+    t = (text or "").lower()
+    cb = (callback_data or "").lower()
+
+    if cb.startswith("c_none:"):
+        return None
+
+    # Danger (Red): cancel, reject, block, close, delete, home, back, off
+    danger_indicators = (
+        "cancel", "বাতিল", "reject", "block", "close", "delete", "মুছুন",
+        "home", "হোম", "back", "ফিরে", "পিছনে", "❌", "🔴", "🚫", "off", "বন্ধ", "লেটার পরিবর্তন"
+    )
+    if any(k in t for k in danger_indicators):
+        return "danger"
+    if cb.startswith(("cx:", "dp:rj:", "ad:back")) or cb == "hm":
+        return "danger"
+    if cb.startswith("ua:") and "blocked" in cb:
+        return "danger"
+
+    # Success (Green): buy, deposit, approve, on, lowest price, all countries, another number
+    success_indicators = (
+        "buy", "কেনা", "ক্রয়", "ক্রয়", "deposit", "জমা", "approve", "অনুমোদন",
+        "🟢 on", "✅", "💵", "সবুজ", "all (সকল দেশ)", "all countries",
+        "আরেকটি", "another", "refresh", "রিফ্রেশ"
+    )
+    if any(k in t for k in success_indicators):
+        return "success"
+    if cb.startswith(("by:", "dp:ap:", "btn_dep")) or cb.endswith(":all"):
+        return "success"
+    if cb.startswith("ua:") and ("user" in cb or "super" in cb):
+        return "success"
+
+    # Primary (Blue): standard actions, services, letters, countries, menu
+    return "primary"
+
+
+_orig_ikb_init = InlineKeyboardButton.__init__
+
+
+def _patched_ikb_init(self, *args, style: Optional[str] = None, **kwargs):
+    text = args[0] if args else kwargs.get("text", "")
+    cb = args[1] if len(args) > 1 else kwargs.get("callback_data")
+    if style is None:
+        style = _detect_button_style(str(text), str(cb) if cb else None)
+    elif style in {"", "none", "default"}:
+        style = None
+
+    if style:
+        api_kwargs = dict(kwargs.get("api_kwargs") or {})
+        api_kwargs["style"] = style
+        kwargs["api_kwargs"] = api_kwargs
+
+    _orig_ikb_init(self, *args, **kwargs)
+
+
+InlineKeyboardButton.__init__ = _patched_ikb_init
+
+_orig_kb_init = KeyboardButton.__init__
+
+
+def _patched_kb_init(self, *args, style: Optional[str] = None, **kwargs):
+    text = args[0] if args else kwargs.get("text", "")
+    if style is None:
+        style = _detect_button_style(str(text), None)
+    elif style in {"", "none", "default"}:
+        style = None
+
+    if style:
+        api_kwargs = dict(kwargs.get("api_kwargs") or {})
+        api_kwargs["style"] = style
+        kwargs["api_kwargs"] = api_kwargs
+
+    _orig_kb_init(self, *args, **kwargs)
+
+
+KeyboardButton.__init__ = _patched_kb_init
+
+_orig_rkm_init = ReplyKeyboardMarkup.__init__
+
+
+def _patched_rkm_init(self, keyboard, *args, **kwargs):
+    styled_kb = []
+    if keyboard:
+        for row in keyboard:
+            new_row = []
+            for item in row:
+                if isinstance(item, str):
+                    new_row.append(KeyboardButton(item))
+                else:
+                    new_row.append(item)
+            styled_kb.append(new_row)
+    else:
+        styled_kb = keyboard
+    _orig_rkm_init(self, styled_kb, *args, **kwargs)
+
+
+ReplyKeyboardMarkup.__init__ = _patched_rkm_init
 
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
@@ -563,22 +663,34 @@ def detect_action(text: str) -> Optional[str]:
 
 
 def main_menu(lang: str, role: str = ROLE_USER) -> ReplyKeyboardMarkup:
-    rows: List[List[str]] = [
-        [tt(lang, "m_popular")],
-        [tt(lang, "m_select"), tt(lang, "m_search")],
-        [tt(lang, "m_profile"), tt(lang, "m_history")],
+    rows = [
+        [KeyboardButton(tt(lang, "m_popular"), style="primary")],
+        [
+            KeyboardButton(tt(lang, "m_select"), style="primary"),
+            KeyboardButton(tt(lang, "m_search"), style="primary"),
+        ],
+        [
+            KeyboardButton(tt(lang, "m_profile"), style="primary"),
+            KeyboardButton(tt(lang, "m_history"), style="primary"),
+        ],
     ]
     if role == ROLE_ADMIN:
-        rows.append([tt(lang, "m_balance"), tt(lang, "m_admin")])
+        rows.append([
+            KeyboardButton(tt(lang, "m_balance"), style="primary"),
+            KeyboardButton(tt(lang, "m_admin"), style="danger"),
+        ])
     elif role in {ROLE_USER, ROLE_SUPER}:
-        rows.append([tt(lang, "m_wallet"), tt(lang, "m_deposit")])
+        rows.append([
+            KeyboardButton(tt(lang, "m_wallet"), style="primary"),
+            KeyboardButton(tt(lang, "m_deposit"), style="success"),
+        ])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
 
 
 def lang_keyboard() -> InlineKeyboardMarkup:
     rows, row = [], []
     for i, lg in enumerate(LANGS, start=1):
-        row.append(InlineKeyboardButton(LANG_LABEL[lg], callback_data=f"lg:{lg}"))
+        row.append(InlineKeyboardButton(LANG_LABEL[lg], callback_data=f"lg:{lg}", style="primary"))
         if i % 2 == 0:
             rows.append(row)
             row = []
@@ -589,8 +701,8 @@ def lang_keyboard() -> InlineKeyboardMarkup:
 
 def copy_button(label: str, text: str, fallback_cb: str) -> InlineKeyboardButton:
     if HAS_COPY and CopyTextButton:
-        return InlineKeyboardButton(label, copy_text=CopyTextButton(text=text))
-    return InlineKeyboardButton(label, callback_data=fallback_cb)
+        return InlineKeyboardButton(label, copy_text=CopyTextButton(text=text), style="primary")
+    return InlineKeyboardButton(label, callback_data=fallback_cb, style="primary")
 
 
 def to_flag(iso2: Optional[str]) -> str:
@@ -2766,12 +2878,12 @@ def svc_keyboard(items: List[Dict[str, str]], page: int, lang: str, mode: str) -
     rows = []
     for s in items[start:end]:
         icon = service_icon(s.get("code", ""), s.get("name", ""))
-        rows.append([InlineKeyboardButton(f"{icon} {s['name']}", callback_data=f"sv:{s['code']}")])
+        rows.append([InlineKeyboardButton(f"{icon} {s['name']}", callback_data=f"sv:{s['code']}", style="primary")])
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton(tt(lang, "prev"), callback_data=f"sp:{mode}:{page - 1}"))
+        nav.append(InlineKeyboardButton(tt(lang, "prev"), callback_data=f"sp:{mode}:{page - 1}", style="primary"))
     if end < len(items):
-        nav.append(InlineKeyboardButton(tt(lang, "next"), callback_data=f"sp:{mode}:{page + 1}"))
+        nav.append(InlineKeyboardButton(tt(lang, "next"), callback_data=f"sp:{mode}:{page + 1}", style="primary"))
     if nav:
         rows.append(nav)
     return InlineKeyboardMarkup(rows)
@@ -3020,12 +3132,12 @@ def price_keyboard(
         cnt_short = f" • {format_count(opt.count, lang)}" if (opt.count is not None and opt.count > 0) else ""
         tag = f" [{opt.panel}]" if is_admin else ""
         label = f"{flag} {c_name} • ${opt.price}{cnt_short}{tag}"
-        rows.append([InlineKeyboardButton(label, callback_data=f"by:{opt.service_code}:{global_idx}")])
+        rows.append([InlineKeyboardButton(label, callback_data=f"by:{opt.service_code}:{global_idx}", style="success")])
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton(tt(lang, "prev"), callback_data=f"pp:{opts[0].service_code}:{page - 1}:{sort_mode}"))
+        nav.append(InlineKeyboardButton(tt(lang, "prev"), callback_data=f"pp:{opts[0].service_code}:{page - 1}:{sort_mode}", style="primary"))
     if end < len(opts):
-        nav.append(InlineKeyboardButton(tt(lang, "next"), callback_data=f"pp:{opts[0].service_code}:{page + 1}:{sort_mode}"))
+        nav.append(InlineKeyboardButton(tt(lang, "next"), callback_data=f"pp:{opts[0].service_code}:{page + 1}:{sort_mode}", style="primary"))
     if nav:
         rows.append(nav)
 
@@ -3037,8 +3149,8 @@ def price_keyboard(
         next_sort = "price"
 
     rows.append([
-        InlineKeyboardButton(sort_btn_text, callback_data=f"so:{next_sort}:{opts[0].service_code}"),
-        InlineKeyboardButton(tt(lang, "home"), callback_data="hm"),
+        InlineKeyboardButton(sort_btn_text, callback_data=f"so:{next_sort}:{opts[0].service_code}", style="primary"),
+        InlineKeyboardButton(tt(lang, "home"), callback_data="hm", style="danger"),
     ])
     return InlineKeyboardMarkup(rows)
 
@@ -3064,27 +3176,27 @@ def country_letter_picker_keyboard(
         row = []
         for let in chunk:
             if let in avail_letters:
-                row.append(InlineKeyboardButton(let, callback_data=f"c_let:{service_code}:{let}"))
+                row.append(InlineKeyboardButton(let, callback_data=f"c_let:{service_code}:{let}", style="primary"))
             else:
-                row.append(InlineKeyboardButton(let, callback_data=f"c_none:{let}"))
+                row.append(InlineKeyboardButton(let, callback_data=f"c_none:{let}", style=""))
         rows.append(row)
 
     # Row 6: Z + All Countries
     row_z = []
     if "Z" in avail_letters:
-        row_z.append(InlineKeyboardButton("Z", callback_data=f"c_let:{service_code}:Z"))
+        row_z.append(InlineKeyboardButton("Z", callback_data=f"c_let:{service_code}:Z", style="primary"))
     else:
-        row_z.append(InlineKeyboardButton("Z", callback_data="c_none:Z"))
+        row_z.append(InlineKeyboardButton("Z", callback_data="c_none:Z", style=""))
 
     all_label = "🌐 All (সকল দেশ)" if lang == "bn" else "🌐 All Countries"
-    row_z.append(InlineKeyboardButton(all_label, callback_data=f"c_let:{service_code}:ALL"))
+    row_z.append(InlineKeyboardButton(all_label, callback_data=f"c_let:{service_code}:ALL", style="success"))
     rows.append(row_z)
 
     # Bottom action buttons:
     sort_btn_text = "💵 সর্বনিম্ন প্রাইস অনুযায়ী দেখুন" if lang == "bn" else "💵 View by Lowest Price"
     rows.append([
-        InlineKeyboardButton(sort_btn_text, callback_data=f"so:price:{service_code}"),
-        InlineKeyboardButton(tt(lang, "home"), callback_data="hm"),
+        InlineKeyboardButton(sort_btn_text, callback_data=f"so:price:{service_code}", style="success"),
+        InlineKeyboardButton(tt(lang, "home"), callback_data="hm", style="danger"),
     ])
     return InlineKeyboardMarkup(rows)
 
@@ -3108,23 +3220,23 @@ def country_picker_keyboard(
         price_tag = f" (${min_p}{cnt_tag})" if min_p else ""
         label = f"{flag} {name}{price_tag}"
         target_code = c.get("key") or c.get("code")
-        rows.append([InlineKeyboardButton(label, callback_data=f"csel:{service_code}:{target_code}:{let_param}")])
+        rows.append([InlineKeyboardButton(label, callback_data=f"csel:{service_code}:{target_code}:{let_param}", style="primary")])
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton(tt(lang, "prev"), callback_data=f"c_let:{service_code}:{let_param}:{page - 1}"))
+        nav.append(InlineKeyboardButton(tt(lang, "prev"), callback_data=f"c_let:{service_code}:{let_param}:{page - 1}", style="primary"))
     if end < len(countries):
-        nav.append(InlineKeyboardButton(tt(lang, "next"), callback_data=f"c_let:{service_code}:{let_param}:{page + 1}"))
+        nav.append(InlineKeyboardButton(tt(lang, "next"), callback_data=f"c_let:{service_code}:{let_param}:{page + 1}", style="primary"))
     if nav:
         rows.append(nav)
 
     back_let_text = "⬅️ লেটার পরিবর্তন (A-Z)" if lang == "bn" else "⬅️ Change Letter (A-Z)"
     sort_btn_text = "💵 সর্বনিম্ন প্রাইস অনুযায়ী দেখুন" if lang == "bn" else "💵 View by Lowest Price"
     rows.append([
-        InlineKeyboardButton(back_let_text, callback_data=f"so:country:{service_code}"),
-        InlineKeyboardButton(sort_btn_text, callback_data=f"so:price:{service_code}"),
+        InlineKeyboardButton(back_let_text, callback_data=f"so:country:{service_code}", style="danger"),
+        InlineKeyboardButton(sort_btn_text, callback_data=f"so:price:{service_code}", style="success"),
     ])
     rows.append([
-        InlineKeyboardButton(tt(lang, "home"), callback_data="hm"),
+        InlineKeyboardButton(tt(lang, "home"), callback_data="hm", style="danger"),
     ])
     return InlineKeyboardMarkup(rows)
 
@@ -3188,21 +3300,21 @@ def country_offers_keyboard(
         prov_short = f" ({opt.provider_name})" if (opt.provider_name and opt.provider_name != "Any Provider") else ""
         tag = f" [{opt.panel}]" if is_admin else ""
         btn_label = f"${opt.price}{cnt_short}{prov_short}{tag}"
-        rows.append([InlineKeyboardButton(btn_label, callback_data=f"by:{service_code}:{master_idx}")])
+        rows.append([InlineKeyboardButton(btn_label, callback_data=f"by:{service_code}:{master_idx}", style="success")])
     nav = []
     let_param = letter or ""
     if page > 0:
-        nav.append(InlineKeyboardButton(tt(lang, "prev"), callback_data=f"pp_cy:{service_code}:{country_code}:{page - 1}:{let_param}"))
+        nav.append(InlineKeyboardButton(tt(lang, "prev"), callback_data=f"pp_cy:{service_code}:{country_code}:{page - 1}:{let_param}", style="primary"))
     if end < len(country_opts):
-        nav.append(InlineKeyboardButton(tt(lang, "next"), callback_data=f"pp_cy:{service_code}:{country_code}:{page + 1}:{let_param}"))
+        nav.append(InlineKeyboardButton(tt(lang, "next"), callback_data=f"pp_cy:{service_code}:{country_code}:{page + 1}:{let_param}", style="primary"))
     if nav:
         rows.append(nav)
 
     back_text = "⬅️ কান্ট্রি লিস্টে ফিরুন" if lang == "bn" else "⬅️ Back to Countries"
     back_cb = f"c_let:{service_code}:{letter}" if (letter and letter != "ALL") else (f"c_let:{service_code}:ALL" if letter == "ALL" else f"so:country:{service_code}")
     rows.append([
-        InlineKeyboardButton(back_text, callback_data=back_cb),
-        InlineKeyboardButton(tt(lang, "home"), callback_data="hm"),
+        InlineKeyboardButton(back_text, callback_data=back_cb, style="danger"),
+        InlineKeyboardButton(tt(lang, "home"), callback_data="hm", style="danger"),
     ])
     return InlineKeyboardMarkup(rows)
 
@@ -3453,8 +3565,8 @@ async def show_country_list(
             empty_msg = f"⚠️ No countries available starting with '{target_letter}'."
             btn_back = "⬅️ Change Letter (A-Z)"
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton(btn_back, callback_data=f"so:country:{service_code}")],
-            [InlineKeyboardButton(tt(lang, "home"), callback_data="hm")],
+            [InlineKeyboardButton(btn_back, callback_data=f"so:country:{service_code}", style="primary")],
+            [InlineKeyboardButton(tt(lang, "home"), callback_data="hm", style="danger")],
         ])
         await safe_edit_message_markdown(query, md(empty_msg), reply_markup=kb)
         return
@@ -3595,7 +3707,7 @@ async def start_poll_task(app: Application, aid: str) -> None:
                 kb = InlineKeyboardMarkup(
                     [
                         [copy_button(tt(lang, "copy_otp"), otp, f"cp:otp:{user_id}")],
-                        [InlineKeyboardButton(tt(lang, "home"), callback_data="hm")],
+                        [InlineKeyboardButton(tt(lang, "home"), callback_data="hm", style="danger")],
                     ]
                 )
                 msg = tt(
@@ -3663,10 +3775,10 @@ def approval_keyboard(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton(tt("en", "approve_user"), callback_data=f"ua:{user_id}:{ROLE_USER}"),
-                InlineKeyboardButton(tt("en", "approve_super"), callback_data=f"ua:{user_id}:{ROLE_SUPER}"),
+                InlineKeyboardButton(tt("en", "approve_user"), callback_data=f"ua:{user_id}:{ROLE_USER}", style="success"),
+                InlineKeyboardButton(tt("en", "approve_super"), callback_data=f"ua:{user_id}:{ROLE_SUPER}", style="primary"),
             ],
-            [InlineKeyboardButton(tt("en", "approve_cancel"), callback_data=f"ua:{user_id}:{ROLE_BLOCKED}")],
+            [InlineKeyboardButton(tt("en", "approve_cancel"), callback_data=f"ua:{user_id}:{ROLE_BLOCKED}", style="danger")],
         ]
     )
 
@@ -3674,12 +3786,12 @@ def approval_keyboard(user_id: int) -> InlineKeyboardMarkup:
 def admin_panel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton(tt("en", "admin_pending"), callback_data="ad:pending")],
-            [InlineKeyboardButton(tt("en", "admin_broadcast"), callback_data="ad:broadcast")],
-            [InlineKeyboardButton(tt("en", "admin_payments"), callback_data="ad:payments")],
-            [InlineKeyboardButton(tt("en", "admin_profit"), callback_data="ad:profit")],
-            [InlineKeyboardButton(tt("en", "admin_stats"), callback_data="ad:stats")],
-            [InlineKeyboardButton("⚙️ Panel Switch / প্যানেল অন-অফ", callback_data="ad:panels")],
+            [InlineKeyboardButton(tt("en", "admin_pending"), callback_data="ad:pending", style="primary")],
+            [InlineKeyboardButton(tt("en", "admin_broadcast"), callback_data="ad:broadcast", style="primary")],
+            [InlineKeyboardButton(tt("en", "admin_payments"), callback_data="ad:payments", style="primary")],
+            [InlineKeyboardButton(tt("en", "admin_profit"), callback_data="ad:profit", style="primary")],
+            [InlineKeyboardButton(tt("en", "admin_stats"), callback_data="ad:stats", style="primary")],
+            [InlineKeyboardButton("⚙️ Panel Switch / প্যানেল অন-অফ", callback_data="ad:panels", style="success")],
         ]
     )
 
@@ -3704,9 +3816,9 @@ def admin_panels_keyboard(panels: Dict[str, bool]) -> InlineKeyboardMarkup:
     s_label = f"SMSCode: {'🟢 ON' if s_on else '🔴 OFF'} (ক্লিক করুন)"
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton(b_label, callback_data="ad:tog:smsbower")],
-            [InlineKeyboardButton(s_label, callback_data="ad:tog:smscode")],
-            [InlineKeyboardButton("⬅️ Back to Admin Panel", callback_data="ad:back")],
+            [InlineKeyboardButton(b_label, callback_data="ad:tog:smsbower", style="success" if b_on else "danger")],
+            [InlineKeyboardButton(s_label, callback_data="ad:tog:smscode", style="success" if s_on else "danger")],
+            [InlineKeyboardButton("⬅️ Back to Admin Panel", callback_data="ad:back", style="danger")],
         ]
     )
 
@@ -3715,8 +3827,8 @@ def deposit_review_keyboard(dep_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [
-                InlineKeyboardButton(tt("en", "deposit_approve"), callback_data=f"dp:ap:{dep_id}"),
-                InlineKeyboardButton(tt("en", "deposit_reject"), callback_data=f"dp:rj:{dep_id}"),
+                InlineKeyboardButton(tt("en", "deposit_approve"), callback_data=f"dp:ap:{dep_id}", style="success"),
+                InlineKeyboardButton(tt("en", "deposit_reject"), callback_data=f"dp:rj:{dep_id}", style="danger"),
             ]
         ]
     )
@@ -3894,19 +4006,19 @@ async def h_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     kb_rows = [
         [
-            InlineKeyboardButton(dep_btn, callback_data="btn_dep"),
-            InlineKeyboardButton(hist_btn, callback_data="btn_hist"),
+            InlineKeyboardButton(dep_btn, callback_data="btn_dep", style="success"),
+            InlineKeyboardButton(hist_btn, callback_data="btn_hist", style="primary"),
         ],
         [
-            InlineKeyboardButton(pop_btn, callback_data="btn_pop"),
-            InlineKeyboardButton(ref_btn, callback_data="btn_prof_ref"),
+            InlineKeyboardButton(pop_btn, callback_data="btn_pop", style="primary"),
+            InlineKeyboardButton(ref_btn, callback_data="btn_prof_ref", style="success"),
         ],
     ]
 
     admin_row = await adb(db.get, ADMIN_USER_ID) or {}
     admin_un = str(admin_row.get("username") or "").strip().lstrip("@")
     if admin_un:
-        kb_rows.append([InlineKeyboardButton(supp_btn, url=f"https://t.me/{admin_un}")])
+        kb_rows.append([InlineKeyboardButton(supp_btn, url=f"https://t.me/{admin_un}", style="primary")])
 
     await safe_reply_markdown(
         update.effective_message,
@@ -3963,8 +4075,8 @@ async def h_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     active_act = await adb(db.latest_active_activation_for_user, user_id)
     if active_act:
         aid = active_act.get("activation_id")
-        kb.append([InlineKeyboardButton("🛑 Cancel Active Number" if lang != "bn" else "🛑 একটিভ নাম্বার ক্যানসেল", callback_data=f"cx:{aid}")])
-    kb.append([InlineKeyboardButton("⭐ Popular Services" if lang != "bn" else "⭐ পপুলার সার্ভিস", callback_data="btn_pop")])
+        kb.append([InlineKeyboardButton("🛑 Cancel Active Number" if lang != "bn" else "🛑 একটিভ নাম্বার ক্যানসেল", callback_data=f"cx:{aid}", style="danger")])
+    kb.append([InlineKeyboardButton("⭐ Popular Services" if lang != "bn" else "⭐ পপুলার সার্ভিস", callback_data="btn_pop", style="primary")])
 
     await safe_reply_markdown(
         update.effective_message,
@@ -4104,9 +4216,9 @@ async def cb_service_select(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         btn_back = "⬅️ Back"
 
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton(btn_price, callback_data=f"so:price:{service_code}")],
-        [InlineKeyboardButton(btn_country, callback_data=f"so:country:{service_code}")],
-        [InlineKeyboardButton(btn_back, callback_data="sp:all:0")],
+        [InlineKeyboardButton(btn_price, callback_data=f"so:price:{service_code}", style="success")],
+        [InlineKeyboardButton(btn_country, callback_data=f"so:country:{service_code}", style="primary")],
+        [InlineKeyboardButton(btn_back, callback_data="sp:all:0", style="danger")],
     ])
     await safe_edit_message_markdown(q, prompt_text, reply_markup=kb)
 
@@ -4514,8 +4626,8 @@ async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     kb = InlineKeyboardMarkup(
         [
             [copy_button(tt(lang, "copy_num"), phone, f"cp:num:{q.from_user.id}")],
-            [InlineKeyboardButton(another_one_label(lang), callback_data=another_cb)],
-            [InlineKeyboardButton(tt(lang, "cancel"), callback_data=f"cx:{aid}")],
+            [InlineKeyboardButton(another_one_label(lang), callback_data=another_cb, style="success")],
+            [InlineKeyboardButton(tt(lang, "cancel"), callback_data=f"cx:{aid}", style="danger")],
         ]
     )
     await q.message.reply_text(
@@ -4699,8 +4811,8 @@ async def cb_another(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     kb = InlineKeyboardMarkup(
         [
             [copy_button(tt(lang, "copy_num"), phone, f"cp:num:{q.from_user.id}")],
-            [InlineKeyboardButton(another_one_label(lang), callback_data=another_cb)],
-            [InlineKeyboardButton(tt(lang, "cancel"), callback_data=f"cx:{aid}")],
+            [InlineKeyboardButton(another_one_label(lang), callback_data=another_cb, style="success")],
+            [InlineKeyboardButton(tt(lang, "cancel"), callback_data=f"cx:{aid}", style="danger")],
         ]
     )
     await q.message.reply_text(
@@ -4796,7 +4908,7 @@ async def h_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     bower_bal, bower_err, code_usd, code_idr, code_err = await _get_panel_balances(context)
     panels = await adb(db.get_panel_status) if hasattr(db, "get_panel_status") else {"smsbower": True, "smscode": True}
     text = format_admin_balance(bower_bal, bower_err, code_usd, code_idr, code_err, lang=lang, panels=panels)
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton(tt(lang, "refresh_bal"), callback_data="br")]])
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton(tt(lang, "refresh_bal"), callback_data="br", style="primary")]])
     await safe_reply_markdown(update.effective_message, md(text), reply_markup=kb)
 
 
@@ -4820,7 +4932,7 @@ async def cb_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     bower_bal, bower_err, code_usd, code_idr, code_err = await _get_panel_balances(context)
     panels = await adb(db.get_panel_status) if hasattr(db, "get_panel_status") else {"smsbower": True, "smscode": True}
     text = format_admin_balance(bower_bal, bower_err, code_usd, code_idr, code_err, lang=lang, panels=panels)
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton(tt(lang, "refresh_bal"), callback_data="br")]])
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton(tt(lang, "refresh_bal"), callback_data="br", style="primary")]])
     try:
         await q.edit_message_text(md(text), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=kb)
     except Exception:
