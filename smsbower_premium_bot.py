@@ -2820,9 +2820,9 @@ async def h_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if admin_un:
         kb_rows.append([InlineKeyboardButton(supp_btn, url=f"https://t.me/{admin_un}")])
 
-    await update.effective_message.reply_text(
+    await safe_reply_markdown(
+        update.effective_message,
         md(card).replace(md(str(user_id)), cd(str(user_id))),
-        parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=InlineKeyboardMarkup(kb_rows),
     )
 
@@ -2834,15 +2834,16 @@ async def h_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if not history:
         msg = "⚠️ আপনার এখনও কোনো নাম্বার কেনার হিস্ট্রি নেই।" if lang == "bn" else "⚠️ You haven't purchased any numbers yet."
-        await update.effective_message.reply_text(
+        await safe_reply_markdown(
+            update.effective_message,
             md(msg),
-            parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=main_menu(lang, role),
         )
         return
 
-    header = "📜 *সাম্প্রতিক নাম্বার হিস্ট্রি (শেষ ৮টি):*\n─────────────────────" if lang == "bn" else "📜 *Recent Number History (Last 8):*\n─────────────────────"
-    lines = [header]
+    title = md("Recent Number History (Last 8):") if lang != "bn" else md("সাম্প্রতিক নাম্বার হিস্ট্রি (শেষ ৮টি):")
+    divider = md("─────────────────────")
+    lines = [f"📜 *{title}*\n{divider}"]
     svc_map = context.application.bot_data.get("svc_cache", {}).get("map", {})
 
     for h in history:
@@ -2856,19 +2857,19 @@ async def h_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if status == "otp_received" and otp:
             st_text = f"✅ OTP: `{escape_markdown(str(otp), version=2, entity_type='code')}`"
         elif status == "active":
-            st_text = "⏳ ওটিপির অপেক্ষায়" if lang == "bn" else "⏳ Waiting for OTP"
+            st_text = md("⏳ ওটিপির অপেক্ষায়" if lang == "bn" else "⏳ Waiting for OTP")
         elif status == "cancelled":
-            st_text = "🛑 ক্যানসেল্ড (রিফান্ডেড)" if lang == "bn" else "🛑 Cancelled (Refunded)"
+            st_text = md("🛑 ক্যানসেল্ড (রিফান্ডেড)" if lang == "bn" else "🛑 Cancelled (Refunded)")
         elif status == "expired":
-            st_text = "⏰ এক্সপায়ার্ড (রিফান্ডেড)" if lang == "bn" else "⏰ Expired (Refunded)"
+            st_text = md("⏰ এক্সপায়ার্ড (রিফান্ডেড)" if lang == "bn" else "⏰ Expired (Refunded)")
         else:
-            st_text = status.capitalize()
+            st_text = md(status.capitalize())
 
         esc_phone = f"`{escape_markdown(phone, version=2, entity_type='code')}`"
         lines.append(f"{icon} {esc_phone} • {md(sname)}\n   └ {st_text}")
 
-    footer = "─────────────────────\n💡 *নাম্বার বা ওটিপিতে ট্যাপ করলেই সরাসরি কপি হবে!*" if lang == "bn" else "─────────────────────\n💡 *Tap any number or OTP to copy instantly!*"
-    lines.append(footer)
+    tip = md("💡 যেকোনো নাম্বার বা ওটিপিতে ট্যাপ করলেই সরাসরি কপি হবে!") if lang == "bn" else md("💡 Tap any number or OTP to copy instantly!")
+    lines.append(f"{divider}\n{tip}")
 
     kb = []
     active_act = await adb(db.latest_active_activation_for_user, user_id)
@@ -2877,9 +2878,9 @@ async def h_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         kb.append([InlineKeyboardButton("🛑 Cancel Active Number" if lang != "bn" else "🛑 একটিভ নাম্বার ক্যানসেল", callback_data=f"cx:{aid}")])
     kb.append([InlineKeyboardButton("⭐ Popular Services" if lang != "bn" else "⭐ পপুলার সার্ভিস", callback_data="btn_pop")])
 
-    await update.effective_message.reply_text(
+    await safe_reply_markdown(
+        update.effective_message,
         "\n".join(lines),
-        parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=InlineKeyboardMarkup(kb),
     )
 
