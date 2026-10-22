@@ -3099,7 +3099,7 @@ async def start_poll_task(app: Application, aid: str) -> None:
                 continue
             if st == "OK" and val:
                 otp = str(val)
-                phone = str(act.get("phone") or user_row.get("phone") or "Unknown")
+                phone = normalize_phone(act.get("phone") or user_row.get("phone") or "Unknown")
                 service_code = str(act.get("service_code") or user_row.get("service_code") or "")
                 service_name = (
                     app.bot_data.get("svc_cache", {}).get("map", {}).get(service_code)
@@ -3420,7 +3420,7 @@ async def h_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     svc_map = context.application.bot_data.get("svc_cache", {}).get("map", {})
 
     for h in history:
-        phone = str(h.get("phone") or "Unknown")
+        phone = normalize_phone(h.get("phone") or "Unknown")
         sc = str(h.get("service_code") or "")
         sname = svc_map.get(sc) or sc.upper() or "Service"
         icon = service_icon(sc, sname)
@@ -3856,7 +3856,7 @@ async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 orders = buy_res.get("data", {}).get("orders", []) if isinstance(buy_res, dict) else []
                 if orders:
                     aid = f"sc_{orders[0]['id']}"
-                    phone = str(orders[0].get("phone_number") or "")
+                    phone = normalize_phone(orders[0].get("phone_number"))
                 else:
                     err = buy_res.get("error") or "NO_NUMBERS"
             except Exception as e:
@@ -3995,7 +3995,7 @@ async def cb_another(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 orders = buy_res.get("data", {}).get("orders", []) if isinstance(buy_res, dict) else []
                 if orders:
                     aid = f"sc_{orders[0]['id']}"
-                    phone = str(orders[0].get("phone_number") or "")
+                    phone = normalize_phone(orders[0].get("phone_number"))
                 else:
                     err = buy_res.get("error") or "NO_NUMBERS"
             except Exception as e:
