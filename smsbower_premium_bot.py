@@ -707,6 +707,18 @@ async def safe_reply_markdown(message, text: str, reply_markup=None) -> None:
         await message.reply_text(plain, reply_markup=reply_markup)
 
 
+async def safe_edit_message_markdown(query_or_msg, text: str, reply_markup=None) -> None:
+    try:
+        await query_or_msg.edit_message_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup)
+    except BadRequest as e:
+        logger.warning("Markdown edit failed, falling back to plain text: %s", e)
+        plain = re.sub(r"\\([_\\*\\[\\]()~`>#+\\-=|{}.!])", r"\1", text)
+        try:
+            await query_or_msg.edit_message_text(plain, reply_markup=reply_markup)
+        except Exception:
+            pass
+
+
 async def adb(fn, *args, **kwargs):
     return await asyncio.to_thread(fn, *args, **kwargs)
 
@@ -2878,19 +2890,26 @@ async def show_country_list(
     )
 
     if lang == "bn":
-        title = f"🌍 *{md(svc_name)} - দেশ নির্বাচন করুন*\n{md(f'পৃষ্ঠা {page + 1}/{pages}')}"
+        sub = "দেশ নির্বাচন করুন"
+        page_str = f"পৃষ্ঠা {page + 1}/{pages}"
     elif lang == "hi":
-        title = f"🌍 *{md(svc_name)} - देश चुनें*\n{md(f'पृष्ठ {page + 1}/{pages}')}"
+        sub = "देश चुनें"
+        page_str = f"पृष्ठ {page + 1}/{pages}"
     elif lang == "ar":
-        title = f"🌍 *{md(svc_name)} - اختر الدولة*\n{md(f'صفحة {page + 1}/{pages}')}"
+        sub = "اختر الدولة"
+        page_str = f"صفحة {page + 1}/{pages}"
     elif lang == "ru":
-        title = f"🌍 *{md(svc_name)} - Выберите страну*\n{md(f'Страница {page + 1}/{pages}')}"
+        sub = "Выберите страну"
+        page_str = f"Страница {page + 1}/{pages}"
     else:
-        title = f"🌍 *{md(svc_name)} - Select Country*\n{md(f'Page {page + 1}/{pages}')}"
+        sub = "Select Country"
+        page_str = f"Page {page + 1}/{pages}"
 
-    await query.edit_message_text(
+    title = f"🌍 *{md(svc_name)}* \\- {md(sub)}\n{md(page_str)}"
+
+    await safe_edit_message_markdown(
+        query,
         title,
-        parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=country_picker_keyboard(unique_countries, service_code, page, lang),
     )
 
@@ -2907,7 +2926,7 @@ async def show_prices(
     name = b.get("svc_cache", {}).get("map", {}).get(service_code, service_code)
     opts = await load_all_prices_for_service(query, context, lang, service_code)
     if not opts:
-        await query.edit_message_text(f"⚠️ {md(tt(lang, 'prices_empty'))}", parse_mode=ParseMode.MARKDOWN_V2)
+        await safe_edit_message_markdown(query, f"⚠️ {md(tt(lang, 'prices_empty'))}")
         return
     context.user_data[f"price_{service_code}"] = opts
 
@@ -2925,9 +2944,9 @@ async def show_prices(
     sort_info = "💵 By Price" if lang != "bn" else "💵 প্রাইস অনুযায়ী"
 
     text = f"🌍 *{md(tt(lang, 'prices', service=name))}*\n{md(f'Page {page + 1}/{pages} • {sort_info}')}"
-    await query.edit_message_text(
+    await safe_edit_message_markdown(
+        query,
         text,
-        parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=price_keyboard(opts, page, lang, is_admin=is_adm, sort_mode=sort_mode),
     )
 
@@ -3486,7 +3505,7 @@ async def cb_service_select(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         [InlineKeyboardButton(btn_country, callback_data=f"so:country:{service_code}")],
         [InlineKeyboardButton(btn_back, callback_data="sp:all:0")],
     ])
-    await q.edit_message_text(prompt_text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=kb)
+    await safe_edit_message_markdown(q, prompt_text, reply_markup=kb)
 
 
 async def cb_sort_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3503,14 +3522,14 @@ async def cb_sort_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await safe_answer_callback(q, tt(lang, "expired"), show_alert=True)
         return
 
-    await q.edit_message_text(md(tt(lang, "load_prices")), parse_mode=ParseMode.MARKDOWN_V2)
+    await safe_edit_message_markdown(q, md(tt(lang, "load_prices")))
     try:
         await show_prices(q, context, lang, service_code, 0, sort_mode=sort_mode)
     except Exception as e:
         logger.warning("show_prices failed: %s", e)
-        await q.message.reply_text(
+        await safe_reply_markdown(
+            q.message,
             md(tt(lang, "generic_fail")),
-            parse_mode=ParseMode.MARKDOWN_V2,
             reply_markup=main_menu(lang, role_of(row)),
         )
 
@@ -3542,9 +3561,9 @@ async def cb_price_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if lang == "bn":
         sort_info = "💵 প্রাইস অনুযায়ী" if sort_mode == "price" else "🌍 কান্ট্রি অনুযায়ী"
     text = f"🌍 *{md(tt(lang, 'prices', service=opts[0].service_name))}*\n{md(f'Page {page + 1}/{pages} • {sort_info}')}"
-    await q.edit_message_text(
+    await safe_edit_message_markdown(
+        q,
         text,
-        parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=price_keyboard(opts, page, lang, is_admin=is_adm, sort_mode=sort_mode),
     )
 
@@ -3585,7 +3604,7 @@ async def cb_country_select(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     opts = context.user_data.get(f"price_{service_code}")
     if not opts:
-        await q.edit_message_text(md(tt(lang, "load_prices")), parse_mode=ParseMode.MARKDOWN_V2)
+        await safe_edit_message_markdown(q, md(tt(lang, "load_prices")))
         opts = await load_all_prices_for_service(q, context, lang, service_code)
         context.user_data[f"price_{service_code}"] = opts
 
@@ -3603,19 +3622,21 @@ async def cb_country_select(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     pages = (len(country_opts) - 1) // PAGE_SIZE + 1
     if lang == "bn":
-        title = f"📱 *{md(svc_name)} • {c_flag} {md(c_name)}*\n{md(f'উপলব্ধ নাম্বার নির্বাচন করুন (পৃষ্ঠা 1/{pages}):')}"
+        sub = f"উপলব্ধ নাম্বার নির্বাচন করুন (পৃষ্ঠা 1/{pages})"
     elif lang == "hi":
-        title = f"📱 *{md(svc_name)} • {c_flag} {md(c_name)}*\n{md(f'उपलब्ध नंबर चुनें (पृष्ठ 1/{pages}):')}"
+        sub = f"उपलब्ध नंबर चुनें (पृष्ठ 1/{pages})"
     elif lang == "ar":
-        title = f"📱 *{md(svc_name)} • {c_flag} {md(c_name)}*\n{md(f'اختر الرقم المتاح (صفحة 1/{pages}):')}"
+        sub = f"اختر الرقم المتاح (صفحة 1/{pages})"
     elif lang == "ru":
-        title = f"📱 *{md(svc_name)} • {c_flag} {md(c_name)}*\n{md(f'Выберите доступный номер (стр. 1/{pages}):')}"
+        sub = f"Выберите доступный номер (стр. 1/{pages})"
     else:
-        title = f"📱 *{md(svc_name)} • {c_flag} {md(c_name)}*\n{md(f'Select available number (Page 1/{pages}):')}"
+        sub = f"Select available number (Page 1/{pages})"
 
-    await q.edit_message_text(
+    title = f"📱 *{md(svc_name)}* • {c_flag} *{md(c_name)}*\n{md(sub)}"
+
+    await safe_edit_message_markdown(
+        q,
         title,
-        parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=country_offers_keyboard(country_opts, service_code, country_code, page=0, lang=lang, is_admin=is_adm),
     )
 
@@ -3652,13 +3673,15 @@ async def cb_country_offers_page(update: Update, context: ContextTypes.DEFAULT_T
 
     pages = (len(country_opts) - 1) // PAGE_SIZE + 1
     if lang == "bn":
-        title = f"📱 *{md(svc_name)} • {c_flag} {md(c_name)}*\n{md(f'পৃষ্ঠা {page + 1}/{pages}')}"
+        page_str = f"পৃষ্ঠা {page + 1}/{pages}"
     else:
-        title = f"📱 *{md(svc_name)} • {c_flag} {md(c_name)}*\n{md(f'Page {page + 1}/{pages}')}"
+        page_str = f"Page {page + 1}/{pages}"
 
-    await q.edit_message_text(
+    title = f"📱 *{md(svc_name)}* • {c_flag} *{md(c_name)}*\n{md(page_str)}"
+
+    await safe_edit_message_markdown(
+        q,
         title,
-        parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=country_offers_keyboard(country_opts, service_code, country_code, page=page, lang=lang, is_admin=is_adm),
     )
 
