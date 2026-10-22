@@ -613,6 +613,37 @@ def country_name_to_iso2(name: str) -> Optional[str]:
         return None
 
 
+def canonical_country_info(iso2: Optional[str], name: Optional[str]) -> Tuple[Optional[str], str]:
+    iso = (iso2 or "").strip().upper()
+    if not (iso and len(iso) == 2 and iso.isalpha()):
+        if name:
+            iso = country_name_to_iso2(name) or ""
+    if iso and pycountry:
+        try:
+            c = pycountry.countries.get(alpha_2=iso)
+            if c and getattr(c, "name", None):
+                return iso, c.name
+        except Exception:
+            pass
+    clean_name = (name or "").strip() or (iso if iso else "Unknown")
+    return (iso if iso else None), clean_name
+
+
+def option_country_key(opt: Any) -> str:
+    iso = (getattr(opt, "country_iso2", None) or "").strip().upper()
+    if iso and len(iso) == 2 and iso.isalpha():
+        return iso
+    name = (getattr(opt, "country_name", None) or "").strip()
+    if name:
+        iso2 = country_name_to_iso2(name)
+        if iso2:
+            return iso2.upper()
+        norm = normalize_country_name(name)
+        if norm:
+            return norm.replace(" ", "_").upper()
+    return str(getattr(opt, "country_code", None) or "UNKNOWN").upper()
+
+
 def fmt_mmss(total_seconds: int) -> str:
     secs = max(0, int(total_seconds))
     m, s = divmod(secs, 60)
@@ -2437,13 +2468,16 @@ def parse_prices(
             continue
         dedupe.add(key)
         c = countries.get(cc, {})
+        raw_name = str(c.get("name") or tt(lang, "fallback_country"))
+        c_iso = c.get("iso2") or country_name_to_iso2(raw_name)
+        canonical_iso, canonical_name = canonical_country_info(c_iso, raw_name)
         out.append(
             PriceOption(
                 service_code=service_code,
                 service_name=service_name,
                 country_code=cc,
-                country_name=str(c.get("name") or tt(lang, "fallback_country")),
-                country_iso2=c.get("iso2"),
+                country_name=canonical_name,
+                country_iso2=canonical_iso or c_iso,
                 provider_id=str(r.get("pid")) if r.get("pid") else None,
                 provider_name=str(r.get("pname")) if r.get("pname") else None,
                 price=price,
@@ -2606,6 +2640,7 @@ async def fetch_smscode_prices_for_service(
     service_code: str,
     service_name: str,
     lang: str,
+    country_id: Optional[int] = None,
 ) -> List[PriceOption]:
     bot_data = context.application.bot_data
     c_cache = bot_data.get("smscode_countries")
@@ -2613,8 +2648,22 @@ async def fetch_smscode_prices_for_service(
         try:
             c_res = await smscode_api.get_countries()
             c_items = c_res.get("data", []) if isinstance(c_res, dict) else []
-            c_cache = {c["id"]: c for c in c_items if isinstance(c, dict) and "id" in c}
+            c_cache = {}
+            c_iso_map = {}
+            for c in c_items:
+                if isinstance(c, dict) and "id" in c:
+                    cid = c["id"]
+                    c_cache[cid] = c
+                    c_cache[str(cid)] = c
+                    iso = str(c.get("code") or "").strip().upper()
+                    if iso:
+                        c_iso_map[iso] = cid
+                        c_iso_map[iso.lower()] = cid
+                    name = str(c.get("name") or "").strip().lower()
+                    if name:
+                        c_iso_map[name] = cid
             bot_data["smscode_countries"] = c_cache
+            bot_data["smscode_countries_by_iso"] = c_iso_map
         except Exception as e:
             logger.warning("Could not cache SMSCode countries: %s", e)
             c_cache = {}
@@ -2645,7 +2694,10 @@ async def fetch_smscode_prices_for_service(
         return []
 
     try:
-        url = f"{smscode_api.base_url}/v2/catalog/products?platform_id={platform_id}&limit=50"
+        if country_id is not None:
+            url = f"{smscode_api.base_url}/v2/catalog/products?platform_id={platform_id}&country_id={country_id}&limit=100"
+        else:
+            url = f"{smscode_api.base_url}/v2/catalog/products?platform_id={platform_id}&limit=500"
         r = await smscode_api.http.get(url, headers=smscode_api._headers())
         if r.status_code != 200:
             return []
@@ -2665,10 +2717,17 @@ async def fetch_smscode_prices_for_service(
         if not price_val:
             continue
         cid = p.get("country_id")
-        cinfo = c_cache.get(cid, {}) if c_cache else {}
-        cname = str(cinfo.get("name") or p.get("name") or f"Country {cid}")
-        ciso = cinfo.get("code")
+        cinfo = c_cache.get(cid) or c_cache.get(str(cid)) or {}
+        raw_name = cinfo.get("name")
+        ciso = str(cinfo.get("code") or "").upper() or None
+        if not ciso and raw_name:
+            ciso = country_name_to_iso2(raw_name)
+        canonical_iso, canonical_name = canonical_country_info(ciso, raw_name or p.get("name") or f"Country {cid}")
+        cname = canonical_name
+        if not ciso:
+            ciso = canonical_iso
         price_str = str(price_val)
+        op_name = p.get("operator_name") or (f"Op {p.get('operator_id')}" if p.get("operator_id") else None)
         out.append(
             PriceOption(
                 service_code=service_code,
@@ -2677,7 +2736,7 @@ async def fetch_smscode_prices_for_service(
                 country_name=cname,
                 country_iso2=ciso,
                 provider_id=f"sc_{p.get('id')}",
-                provider_name=None,
+                provider_name=op_name,
                 price=price_str,
                 base_price=price_str,
                 panel="SMSCode",
@@ -2736,7 +2795,8 @@ def country_picker_keyboard(
         min_p = c.get("min_price")
         price_tag = f" (${min_p})" if min_p else ""
         label = f"{flag} {name}{price_tag}"
-        rows.append([InlineKeyboardButton(label, callback_data=f"csel:{service_code}:{c['code']}")])
+        target_code = c.get("key") or c.get("code")
+        rows.append([InlineKeyboardButton(label, callback_data=f"csel:{service_code}:{target_code}")])
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton(tt(lang, "prev"), callback_data=f"cp_cy:{service_code}:{page - 1}"))
@@ -2865,18 +2925,20 @@ async def show_country_list(
 
     by_country: Dict[str, Dict[str, Any]] = {}
     for o in opts:
-        cc = str(o.country_code)
-        if cc not in by_country:
-            by_country[cc] = {
-                "code": cc,
-                "name": o.country_name,
-                "iso2": o.country_iso2,
-                "min_price": dec(o.price, "999999"),
+        ckey = option_country_key(o)
+        price_val = dec(o.price, "999999")
+        if ckey not in by_country:
+            canonical_iso, canonical_name = canonical_country_info(o.country_iso2, o.country_name)
+            by_country[ckey] = {
+                "key": ckey,
+                "code": ckey,
+                "name": canonical_name,
+                "iso2": canonical_iso or o.country_iso2,
+                "min_price": price_val,
             }
         else:
-            p = dec(o.price, "999999")
-            if p < by_country[cc]["min_price"]:
-                by_country[cc]["min_price"] = p
+            if price_val < by_country[ckey]["min_price"]:
+                by_country[ckey]["min_price"] = price_val
 
     unique_countries = list(by_country.values())
     unique_countries.sort(key=lambda c: c["name"].lower())
@@ -3597,7 +3659,7 @@ async def cb_country_select(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     is_adm = (role == ROLE_ADMIN or q.from_user.id == ADMIN_USER_ID)
 
     try:
-        _, service_code, country_code = q.data.split(":", 2)
+        _, service_code, country_key = q.data.split(":", 2)
     except Exception:
         await safe_answer_callback(q, tt(lang, "expired"), show_alert=True)
         return
@@ -3608,7 +3670,32 @@ async def cb_country_select(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         opts = await load_all_prices_for_service(q, context, lang, service_code)
         context.user_data[f"price_{service_code}"] = opts
 
-    country_opts = [(i, o) for i, o in enumerate(opts) if str(o.country_code) == str(country_code)]
+    target_key = country_key.strip().upper()
+    country_opts = [(i, o) for i, o in enumerate(opts) if option_country_key(o) == target_key]
+    if not country_opts:
+        country_opts = [(i, o) for i, o in enumerate(opts) if str(o.country_code) == country_key]
+
+    smscode_api: Optional[SMSCodeAPI] = context.application.bot_data.get("smscode_api")
+    if smscode_api and smscode_api.api_key and not any(o.panel == "SMSCode" for _, o in country_opts):
+        c_iso_map = context.application.bot_data.get("smscode_countries_by_iso", {})
+        sc_cid = c_iso_map.get(target_key) or c_iso_map.get(target_key.lower())
+        if sc_cid:
+            try:
+                sc_name = opts[0].service_name if opts else service_code
+                more_sc = await fetch_smscode_prices_for_service(
+                    context, smscode_api, service_code, sc_name, lang, country_id=sc_cid
+                )
+                if more_sc:
+                    user_row = await adb(db.get, q.from_user.id) if q.from_user else None
+                    r_role = role_of(user_row)
+                    p_pct = await adb(db.get_profit_percent) if hasattr(db, "get_profit_percent") else Decimal("20")
+                    more_sc = apply_role_prices(more_sc, r_role, p_pct)
+                    opts.extend(more_sc)
+                    context.user_data[f"price_{service_code}"] = opts
+                    country_opts = [(i, o) for i, o in enumerate(opts) if option_country_key(o) == target_key]
+            except Exception as e:
+                logger.warning("Dynamic SMSCode country fetch failed: %s", e)
+
     if not country_opts:
         await safe_answer_callback(q, "No numbers available for this country", show_alert=True)
         return
@@ -3617,8 +3704,9 @@ async def cb_country_select(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     c_sample = country_opts[0][1]
     svc_name = c_sample.service_name
-    c_flag = to_flag(c_sample.country_iso2)
-    c_name = c_sample.country_name
+    canonical_iso, canonical_name = canonical_country_info(c_sample.country_iso2, c_sample.country_name)
+    c_flag = to_flag(canonical_iso or c_sample.country_iso2)
+    c_name = canonical_name or c_sample.country_name
 
     pages = (len(country_opts) - 1) // PAGE_SIZE + 1
     if lang == "bn":
@@ -3637,7 +3725,7 @@ async def cb_country_select(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await safe_edit_message_markdown(
         q,
         title,
-        reply_markup=country_offers_keyboard(country_opts, service_code, country_code, page=0, lang=lang, is_admin=is_adm),
+        reply_markup=country_offers_keyboard(country_opts, service_code, country_key, page=0, lang=lang, is_admin=is_adm),
     )
 
 
@@ -3653,14 +3741,18 @@ async def cb_country_offers_page(update: Update, context: ContextTypes.DEFAULT_T
     is_adm = (role == ROLE_ADMIN or q.from_user.id == ADMIN_USER_ID)
 
     try:
-        _, service_code, country_code, p_str = q.data.split(":", 3)
+        _, service_code, country_key, p_str = q.data.split(":", 3)
         page = max(0, int(p_str))
     except Exception:
         await safe_answer_callback(q, tt(lang, "expired"), show_alert=True)
         return
 
     opts = context.user_data.get(f"price_{service_code}") or []
-    country_opts = [(i, o) for i, o in enumerate(opts) if str(o.country_code) == str(country_code)]
+    target_key = country_key.strip().upper()
+    country_opts = [(i, o) for i, o in enumerate(opts) if option_country_key(o) == target_key]
+    if not country_opts:
+        country_opts = [(i, o) for i, o in enumerate(opts) if str(o.country_code) == country_key]
+
     if not country_opts:
         await safe_answer_callback(q, tt(lang, "expired"), show_alert=True)
         return
@@ -3668,8 +3760,9 @@ async def cb_country_offers_page(update: Update, context: ContextTypes.DEFAULT_T
     country_opts.sort(key=lambda item: float(item[1].price) if re.match(r"^\d+(\.\d+)?$", item[1].price) else 999999.0)
     c_sample = country_opts[0][1]
     svc_name = c_sample.service_name
-    c_flag = to_flag(c_sample.country_iso2)
-    c_name = c_sample.country_name
+    canonical_iso, canonical_name = canonical_country_info(c_sample.country_iso2, c_sample.country_name)
+    c_flag = to_flag(canonical_iso or c_sample.country_iso2)
+    c_name = canonical_name or c_sample.country_name
 
     pages = (len(country_opts) - 1) // PAGE_SIZE + 1
     if lang == "bn":
@@ -3682,7 +3775,7 @@ async def cb_country_offers_page(update: Update, context: ContextTypes.DEFAULT_T
     await safe_edit_message_markdown(
         q,
         title,
-        reply_markup=country_offers_keyboard(country_opts, service_code, country_code, page=page, lang=lang, is_admin=is_adm),
+        reply_markup=country_offers_keyboard(country_opts, service_code, country_key, page=page, lang=lang, is_admin=is_adm),
     )
 
 
@@ -3928,8 +4021,8 @@ async def cb_another(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     countries = context.application.bot_data.get("country_cache", {}).get("items") or {}
     cinfo = countries.get(str(country_code), {}) if isinstance(countries, dict) else {}
-    resolved_name = str(cinfo.get("name") or tt(lang, "fallback_country")).strip()
-    resolved_iso2 = cinfo.get("iso2") or country_name_to_iso2(resolved_name)
+    resolved_name = str(cinfo.get("name") or (opt.country_name if opt else None) or tt(lang, "fallback_country")).strip()
+    resolved_iso2 = cinfo.get("iso2") or (opt.country_iso2 if opt else None) or country_name_to_iso2(resolved_name)
     country_display = f"{to_flag(resolved_iso2)} {resolved_name} ({country_code})"
     provider = f"Provider {provider_id}" if provider_id else tt(lang, "fallback_provider")
     service_name = (
