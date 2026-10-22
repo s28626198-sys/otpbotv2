@@ -853,6 +853,15 @@ class DB:
             c.execute("CREATE INDEX IF NOT EXISTS idx_activations_user_status ON activations(user_id, status)")
             c.execute(
                 """
+                CREATE TABLE IF NOT EXISTS settings(
+                  key TEXT PRIMARY KEY,
+                  value TEXT NOT NULL,
+                  updated INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+                )
+                """
+            )
+            c.execute(
+                """
                 INSERT INTO activations(
                   activation_id, user_id, chat_id, service_code, country_code, provider_id, phone, status, otp_code, created_at, updated_at
                 )
@@ -1062,6 +1071,53 @@ class DB:
             row = c.execute("SELECT COUNT(1) as cnt FROM activations WHERE user_id=?", (user_id,)).fetchone()
             c.close()
             return int(row["cnt"]) if row else 0
+
+    def get_setting(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        with self.lock:
+            c = self.conn()
+            row = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+            c.close()
+            return str(row[0]) if row else default
+
+    def set_setting(self, key: str, value: str) -> None:
+        with self.lock:
+            c = self.conn()
+            c.execute(
+                """
+                INSERT INTO settings(key, value, updated)
+                VALUES(?, ?, strftime('%s','now'))
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated=excluded.updated
+                """,
+                (key, str(value)),
+            )
+            c.commit()
+            c.close()
+
+    def get_panel_status(self) -> Dict[str, bool]:
+        raw = self.get_setting("panel_status", "")
+        if raw:
+            try:
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    return {
+                        "smsbower": bool(data.get("smsbower", True)),
+                        "smscode": bool(data.get("smscode", True)),
+                    }
+            except Exception:
+                pass
+        return {"smsbower": True, "smscode": True}
+
+    def set_panel_status(self, bower: bool, smscode: bool) -> None:
+        data = {"smsbower": bool(bower), "smscode": bool(smscode)}
+        self.set_setting("panel_status", json.dumps(data))
+
+    def toggle_panel(self, panel_name: str) -> Dict[str, bool]:
+        status = self.get_panel_status()
+        panel_key = panel_name.lower().strip()
+        if panel_key in status:
+            status[panel_key] = not status[panel_key]
+            self.set_panel_status(status.get("smsbower", True), status.get("smscode", True))
+        return status
 
 
 class SupabaseDB:
@@ -1363,6 +1419,32 @@ class SupabaseDB:
             cur[kk] = str(v or "").strip()
         self.set_setting("payment_methods", json.dumps(cur, ensure_ascii=False))
         return cur
+
+    def get_panel_status(self) -> Dict[str, bool]:
+        raw = self.get_setting("panel_status", "")
+        if raw:
+            try:
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    return {
+                        "smsbower": bool(data.get("smsbower", True)),
+                        "smscode": bool(data.get("smscode", True)),
+                    }
+            except Exception:
+                pass
+        return {"smsbower": True, "smscode": True}
+
+    def set_panel_status(self, bower: bool, smscode: bool) -> None:
+        data = {"smsbower": bool(bower), "smscode": bool(smscode)}
+        self.set_setting("panel_status", json.dumps(data))
+
+    def toggle_panel(self, panel_name: str) -> Dict[str, bool]:
+        status = self.get_panel_status()
+        panel_key = panel_name.lower().strip()
+        if panel_key in status:
+            status[panel_key] = not status[panel_key]
+            self.set_panel_status(status.get("smsbower", True), status.get("smscode", True))
+        return status
 
     def adjust_balance(self, user_id: int, delta: Decimal, require_non_negative: bool = False) -> Optional[Decimal]:
         with self.lock:
@@ -1855,6 +1937,32 @@ class SupabaseRESTDB:
                 cur[kk] = str(v or "").strip()
         self.set_setting("payment_methods", json.dumps(cur, ensure_ascii=False))
         return cur
+
+    def get_panel_status(self) -> Dict[str, bool]:
+        raw = self.get_setting("panel_status", "")
+        if raw:
+            try:
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    return {
+                        "smsbower": bool(data.get("smsbower", True)),
+                        "smscode": bool(data.get("smscode", True)),
+                    }
+            except Exception:
+                pass
+        return {"smsbower": True, "smscode": True}
+
+    def set_panel_status(self, bower: bool, smscode: bool) -> None:
+        data = {"smsbower": bool(bower), "smscode": bool(smscode)}
+        self.set_setting("panel_status", json.dumps(data))
+
+    def toggle_panel(self, panel_name: str) -> Dict[str, bool]:
+        status = self.get_panel_status()
+        panel_key = panel_name.lower().strip()
+        if panel_key in status:
+            status[panel_key] = not status[panel_key]
+            self.set_panel_status(status.get("smsbower", True), status.get("smscode", True))
+        return status
 
     def adjust_balance(self, user_id: int, delta: Decimal, require_non_negative: bool = False) -> Optional[Decimal]:
         with self.lock:
@@ -2924,19 +3032,29 @@ async def load_all_prices_for_service(
     db = b["db"]
     name = b.get("svc_cache", {}).get("map", {}).get(service_code, service_code)
     countries = await cached_countries(context)
-    payload = None
-    for a in ("getPricesV3", "getPricesV2", "getPrices"):
-        try:
-            payload = await api.call(a, service=service_code)
-            if payload:
-                break
-        except Exception:
-            continue
-    opts = parse_prices(payload, service_code, name, countries, lang) if payload else []
-    for o in opts:
-        o.panel = "SMSBower"
 
-    if smscode_api and smscode_api.api_key:
+    panels = await adb(db.get_panel_status) if hasattr(db, "get_panel_status") else {"smsbower": True, "smscode": True}
+    bower_enabled = bool(panels.get("smsbower", True))
+    smscode_enabled = bool(panels.get("smscode", True))
+
+    opts: List[PriceOption] = []
+
+    if bower_enabled:
+        payload = None
+        for a in ("getPricesV3", "getPricesV2", "getPrices"):
+            try:
+                payload = await api.call(a, service=service_code)
+                if payload:
+                    break
+            except Exception:
+                continue
+        if payload:
+            bower_opts = parse_prices(payload, service_code, name, countries, lang)
+            for o in bower_opts:
+                o.panel = "SMSBower"
+            opts.extend(bower_opts)
+
+    if smscode_enabled and smscode_api and smscode_api.api_key:
         try:
             sc_opts = await fetch_smscode_prices_for_service(context, smscode_api, service_code, name, lang)
             opts.extend(sc_opts)
@@ -2959,11 +3077,18 @@ async def show_country_list(
     page: int = 0,
     opts: Optional[List[PriceOption]] = None,
 ) -> None:
+    db = context.application.bot_data["db"]
+    panels = await adb(db.get_panel_status) if hasattr(db, "get_panel_status") else {"smsbower": True, "smscode": True}
+    bower_on = bool(panels.get("smsbower", True))
+    smscode_on = bool(panels.get("smscode", True))
+
     if opts is None:
         opts = context.user_data.get(f"price_{service_code}")
     if not opts:
         opts = await load_all_prices_for_service(query, context, lang, service_code)
         context.user_data[f"price_{service_code}"] = opts
+    elif opts:
+        opts = [o for o in opts if (o.panel == "SMSBower" and bower_on) or (o.panel == "SMSCode" and smscode_on)]
 
     if not opts:
         await query.edit_message_text(f"⚠️ {md(tt(lang, 'prices_empty'))}", parse_mode=ParseMode.MARKDOWN_V2)
@@ -3212,6 +3337,34 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(tt("en", "admin_payments"), callback_data="ad:payments")],
             [InlineKeyboardButton(tt("en", "admin_profit"), callback_data="ad:profit")],
             [InlineKeyboardButton(tt("en", "admin_stats"), callback_data="ad:stats")],
+            [InlineKeyboardButton("⚙️ Panel Switch / প্যানেল অন-অফ", callback_data="ad:panels")],
+        ]
+    )
+
+
+def admin_panels_text(panels: Dict[str, bool]) -> str:
+    b_st = "🟢 ON (সচল)" if panels.get("smsbower", True) else "🔴 OFF (বন্ধ)"
+    s_st = "🟢 ON (সচল)" if panels.get("smscode", True) else "🔴 OFF (বন্ধ)"
+    return (
+        "⚙️ *Panel Control / প্যানেল অন\\-অফ নিয়ন্ত্রণ*\n\n"
+        f"• *SMSBower*: {b_st}\n"
+        f"• *SMSCode*: {s_st}\n\n"
+        "💡 *যে প্যানেল ON থাকবে, বটে শুধুমাত্র সেই প্যানেলের নাম্বার ও প্রাইস শো হবে।* "
+        "কোনো প্যানেল OFF করলে সেই প্যানেলের নাম্বার বটে আসবে না।\n\n"
+        "👇 নিচের বাটনে ক্লিক করে যেকোনো প্যানেল অন বা অফ করুন:"
+    )
+
+
+def admin_panels_keyboard(panels: Dict[str, bool]) -> InlineKeyboardMarkup:
+    b_on = bool(panels.get("smsbower", True))
+    s_on = bool(panels.get("smscode", True))
+    b_label = f"SMSBower: {'🟢 ON' if b_on else '🔴 OFF'} (ক্লিক করুন)"
+    s_label = f"SMSCode: {'🟢 ON' if s_on else '🔴 OFF'} (ক্লিক করুন)"
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(b_label, callback_data="ad:tog:smsbower")],
+            [InlineKeyboardButton(s_label, callback_data="ad:tog:smscode")],
+            [InlineKeyboardButton("⬅️ Back to Admin Panel", callback_data="ad:back")],
         ]
     )
 
@@ -3659,8 +3812,12 @@ async def cb_price_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await safe_answer_callback(q, tt(lang, "expired"), show_alert=True)
         return
     opts = context.user_data.get(f"price_{code}") or []
+    panels = await adb(db.get_panel_status) if hasattr(db, "get_panel_status") else {"smsbower": True, "smscode": True}
+    bower_on = bool(panels.get("smsbower", True))
+    smscode_on = bool(panels.get("smscode", True))
+    opts = [o for o in opts if (o.panel == "SMSBower" and bower_on) or (o.panel == "SMSCode" and smscode_on)]
     if not opts:
-        await safe_answer_callback(q, tt(lang, "expired"), show_alert=True)
+        await safe_answer_callback(q, tt(lang, "prices_empty"), show_alert=True)
         return
     pages = (len(opts) - 1) // PAGE_SIZE + 1
     role = role_of(row)
@@ -3717,12 +3874,17 @@ async def cb_country_select(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         context.user_data[f"price_{service_code}"] = opts
 
     target_key = country_key.strip().upper()
+    panels = await adb(db.get_panel_status) if hasattr(db, "get_panel_status") else {"smsbower": True, "smscode": True}
+    bower_on = bool(panels.get("smsbower", True))
+    smscode_on = bool(panels.get("smscode", True))
+    opts = [o for o in opts if (o.panel == "SMSBower" and bower_on) or (o.panel == "SMSCode" and smscode_on)]
+
     country_opts = [(i, o) for i, o in enumerate(opts) if option_country_key(o) == target_key]
     if not country_opts:
         country_opts = [(i, o) for i, o in enumerate(opts) if str(o.country_code) == country_key]
 
     smscode_api: Optional[SMSCodeAPI] = context.application.bot_data.get("smscode_api")
-    if smscode_api and smscode_api.api_key and not any(o.panel == "SMSCode" for _, o in country_opts):
+    if smscode_on and smscode_api and smscode_api.api_key and not any(o.panel == "SMSCode" for _, o in country_opts):
         c_iso_map = context.application.bot_data.get("smscode_countries_by_iso", {})
         sc_cid = c_iso_map.get(target_key) or c_iso_map.get(target_key.lower())
         if sc_cid:
@@ -3738,7 +3900,10 @@ async def cb_country_select(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                     more_sc = apply_role_prices(more_sc, r_role, p_pct)
                     opts.extend(more_sc)
                     context.user_data[f"price_{service_code}"] = opts
-                    country_opts = [(i, o) for i, o in enumerate(opts) if option_country_key(o) == target_key]
+                    country_opts = [
+                        (i, o) for i, o in enumerate(opts)
+                        if option_country_key(o) == target_key and ((o.panel == "SMSBower" and bower_on) or (o.panel == "SMSCode" and smscode_on))
+                    ]
             except Exception as e:
                 logger.warning("Dynamic SMSCode country fetch failed: %s", e)
 
@@ -3848,6 +4013,15 @@ async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     opt: PriceOption = opts[idx]
+    panels = await adb(db.get_panel_status) if hasattr(db, "get_panel_status") else {"smsbower": True, "smscode": True}
+    if opt.panel == "SMSCode" and not panels.get("smscode", True):
+        msg = "⚠️ SMSCode প্যানেলটি এডমিন কর্তৃক বন্ধ রাখা হয়েছে।" if lang == "bn" else "⚠️ SMSCode panel is currently disabled."
+        await safe_answer_callback(q, msg, show_alert=True)
+        return
+    if opt.panel == "SMSBower" and not panels.get("smsbower", True):
+        msg = "⚠️ SMSBower প্যানেলটি এডমিন কর্তৃক বন্ধ রাখা হয়েছে।" if lang == "bn" else "⚠️ SMSBower panel is currently disabled."
+        await safe_answer_callback(q, msg, show_alert=True)
+        return
     charge = dec(opt.price, "0")
     base_cost = dec(opt.base_price or opt.price, "0")
     deducted = False
@@ -4011,6 +4185,16 @@ async def cb_another(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         opt = price_map.get((service_code, country_code, "none"))
     charge = dec(opt.price, "0") if opt else Decimal("0")
     base_cost = dec(opt.base_price or opt.price, "0") if opt else Decimal("0")
+    panels = await adb(db.get_panel_status) if hasattr(db, "get_panel_status") else {"smsbower": True, "smscode": True}
+    is_smscode_panel = bool(opt and opt.panel == "SMSCode")
+    if is_smscode_panel and not panels.get("smscode", True):
+        msg = "⚠️ SMSCode প্যানেলটি এডমিন কর্তৃক বন্ধ রাখা হয়েছে।" if lang == "bn" else "⚠️ SMSCode panel is currently disabled."
+        await safe_answer_callback(q, msg, show_alert=True)
+        return
+    if not is_smscode_panel and not panels.get("smsbower", True):
+        msg = "⚠️ SMSBower প্যানেলটি এডমিন কর্তৃক বন্ধ রাখা হয়েছে।" if lang == "bn" else "⚠️ SMSBower panel is currently disabled."
+        await safe_answer_callback(q, msg, show_alert=True)
+        return
     deducted = False
     if role in {ROLE_USER, ROLE_SUPER}:
         bal = await adb(db.adjust_balance, q.from_user.id, -charge, require_non_negative=True)
@@ -4161,7 +4345,12 @@ def format_admin_balance(
     code_idr: Optional[int],
     code_err: Optional[str],
     lang: str = "en",
+    panels: Optional[Dict[str, bool]] = None,
 ) -> str:
+    panels = panels or {"smsbower": True, "smscode": True}
+    b_tag = " [🟢 ON]" if panels.get("smsbower", True) else " [🔴 OFF]"
+    s_tag = " [🟢 ON]" if panels.get("smscode", True) else " [🔴 OFF]"
+
     bower_line = f"${bower_bal} USD" if bower_bal is not None else f"❌ {bower_err or 'Error'}"
     if code_usd is not None:
         code_line = f"${code_usd} USD"
@@ -4171,7 +4360,7 @@ def format_admin_balance(
         code_line = f"❌ {code_err or 'Error'}"
 
     if lang == "bn":
-        title = "💰 প্যানেল ব্যালেন্স বিবরণ"
+        title = "💰 প্যানেল ব্যালেন্স ও স্ট্যাটাস"
     elif lang == "hi":
         title = "💰 पैनल बैलेंस विवरण"
     elif lang == "ar":
@@ -4184,8 +4373,8 @@ def format_admin_balance(
     return (
         f"{title}\n"
         f"─────────────────────\n"
-        f"🔹 SMSBower: {bower_line}\n"
-        f"🔹 SMSCode: {code_line}\n"
+        f"🔹 SMSBower{b_tag}: {bower_line}\n"
+        f"🔹 SMSCode{s_tag}: {code_line}\n"
         f"─────────────────────"
     )
 
@@ -4232,7 +4421,8 @@ async def h_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
     bower_bal, bower_err, code_usd, code_idr, code_err = await _get_panel_balances(context)
-    text = format_admin_balance(bower_bal, bower_err, code_usd, code_idr, code_err, lang=lang)
+    panels = await adb(db.get_panel_status) if hasattr(db, "get_panel_status") else {"smsbower": True, "smscode": True}
+    text = format_admin_balance(bower_bal, bower_err, code_usd, code_idr, code_err, lang=lang, panels=panels)
     kb = InlineKeyboardMarkup([[InlineKeyboardButton(tt(lang, "refresh_bal"), callback_data="br")]])
     await safe_reply_markdown(update.effective_message, md(text), reply_markup=kb)
 
@@ -4255,7 +4445,8 @@ async def cb_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         )
         return
     bower_bal, bower_err, code_usd, code_idr, code_err = await _get_panel_balances(context)
-    text = format_admin_balance(bower_bal, bower_err, code_usd, code_idr, code_err, lang=lang)
+    panels = await adb(db.get_panel_status) if hasattr(db, "get_panel_status") else {"smsbower": True, "smscode": True}
+    text = format_admin_balance(bower_bal, bower_err, code_usd, code_idr, code_err, lang=lang, panels=panels)
     kb = InlineKeyboardMarkup([[InlineKeyboardButton(tt(lang, "refresh_bal"), callback_data="br")]])
     try:
         await q.edit_message_text(md(text), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=kb)
@@ -4623,6 +4814,42 @@ async def cb_admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             f"Blocked: {s.get('blocked', 0)}"
         )
         await q.message.reply_text(md(text), parse_mode=ParseMode.MARKDOWN_V2)
+        return
+    if action == "panels":
+        panels = await adb(db.get_panel_status)
+        text = admin_panels_text(panels)
+        kb = admin_panels_keyboard(panels)
+        try:
+            await q.edit_message_text(md(text), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=kb)
+        except Exception:
+            await q.message.reply_text(md(text), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=kb)
+        return
+    if action.startswith("tog:"):
+        panel_key = action.split(":", 1)[1]
+        panels = await adb(db.toggle_panel, panel_key)
+        new_val = "ON (সচল)" if panels.get(panel_key, True) else "OFF (বন্ধ)"
+        p_name = "SMSBower" if panel_key == "smsbower" else "SMSCode"
+        await safe_answer_callback(q, f"{p_name} এখন {new_val}!", show_alert=False)
+        text = admin_panels_text(panels)
+        kb = admin_panels_keyboard(panels)
+        try:
+            await q.edit_message_text(md(text), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=kb)
+        except Exception:
+            pass
+        return
+    if action == "back":
+        try:
+            await q.edit_message_text(
+                md(tt("en", "admin_panel")),
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=admin_panel_keyboard(),
+            )
+        except Exception:
+            await q.message.reply_text(
+                md(tt("en", "admin_panel")),
+                parse_mode=ParseMode.MARKDOWN_V2,
+                reply_markup=admin_panel_keyboard(),
+            )
         return
 
 
