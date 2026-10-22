@@ -19,6 +19,10 @@ services:
         sync: false
       - key: TEMPLINE_BASE_URL
         value: "https://smsbower.page/stubs/handler_api.php"
+      - key: SMSCODE_BASE_URL
+        value: "https://api.smscode.gg"
+      - key: SMSCODE_API_KEY
+        value: "14e9e5086d6b5ee4ddacd461ffcb1bb3d162b6e4b80f20210953e14fa3347220"
       - key: POLL_INTERVAL_SECONDS
         value: "4"
       - key: CANCEL_LOCK_SECONDS

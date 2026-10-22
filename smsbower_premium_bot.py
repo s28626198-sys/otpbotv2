@@ -2860,9 +2860,13 @@ async def fetch_smscode_prices_for_service(
     try:
         if country_id is not None:
             url = f"{smscode_api.base_url}/v2/catalog/products?platform_id={platform_id}&country_id={country_id}&limit=100"
+            r = await smscode_api.http.get(url, headers=smscode_api._headers())
         else:
-            url = f"{smscode_api.base_url}/v2/catalog/products?platform_id={platform_id}&limit=500"
-        r = await smscode_api.http.get(url, headers=smscode_api._headers())
+            url = f"{smscode_api.base_url}/v1/catalog/products?platform_id={platform_id}&limit=5000"
+            r = await smscode_api.http.get(url, headers=smscode_api._headers())
+            if r.status_code != 200:
+                url_v2 = f"{smscode_api.base_url}/v2/catalog/products?platform_id={platform_id}&limit=1000"
+                r = await smscode_api.http.get(url_v2, headers=smscode_api._headers())
         if r.status_code != 200:
             return []
         data = r.json().get("data", [])
@@ -2870,6 +2874,7 @@ async def fetch_smscode_prices_for_service(
         logger.warning("Failed to fetch SMSCode products for platform_id=%s: %s", platform_id, e)
         return []
 
+    fx = Decimal("18030")
     out: List[PriceOption] = []
     for p in data:
         if not isinstance(p, dict):
@@ -2877,20 +2882,40 @@ async def fetch_smscode_prices_for_service(
         avail = p.get("available", 0)
         if avail <= 0:
             continue
-        price_val = p.get("price", {}).get("amount")
-        if not price_val:
+
+        price_obj = p.get("price")
+        if isinstance(price_obj, dict):
+            price_val = price_obj.get("amount")
+            if not price_val:
+                continue
+            price_str = str(price_val)
+        elif isinstance(price_obj, (int, float, str)) and price_obj:
+            try:
+                price_usd = (Decimal(str(price_obj)) / fx).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+                price_str = str(price_usd)
+            except Exception:
+                continue
+        else:
             continue
+
         cid = p.get("country_id")
         cinfo = c_cache.get(cid) or c_cache.get(str(cid)) or {}
         raw_name = cinfo.get("name")
         ciso = str(cinfo.get("code") or "").upper() or None
+        if not raw_name:
+            p_name = str(p.get("name") or "")
+            if "-" in p_name:
+                raw_name = p_name.split("-", 1)[-1].strip()
+            else:
+                raw_name = p_name
+        if raw_name:
+            raw_name = re.sub(r"[^\w\s\(\)\,\.\-]", "", raw_name).strip()
         if not ciso and raw_name:
             ciso = country_name_to_iso2(raw_name)
-        canonical_iso, canonical_name = canonical_country_info(ciso, raw_name or p.get("name") or f"Country {cid}")
+        canonical_iso, canonical_name = canonical_country_info(ciso, raw_name or f"Country {cid}")
         cname = canonical_name
         if not ciso:
             ciso = canonical_iso
-        price_str = str(price_val)
         op_name = p.get("operator_name") or (f"Op {p.get('operator_id')}" if p.get("operator_id") else None)
         out.append(
             PriceOption(
@@ -3223,9 +3248,9 @@ async def load_all_prices_for_service(
     bower_enabled = bool(panels.get("smsbower", True))
     smscode_enabled = bool(panels.get("smscode", True))
 
-    opts: List[PriceOption] = []
-
-    if bower_enabled:
+    async def _fetch_bower() -> List[PriceOption]:
+        if not bower_enabled:
+            return []
         payload = None
         for a in ("getPricesV3", "getPricesV2", "getPrices"):
             try:
@@ -3238,14 +3263,23 @@ async def load_all_prices_for_service(
             bower_opts = parse_prices(payload, service_code, name, countries, lang)
             for o in bower_opts:
                 o.panel = "SMSBower"
-            opts.extend(bower_opts)
+            return bower_opts
+        return []
 
-    if smscode_enabled and smscode_api and smscode_api.api_key:
+    async def _fetch_smscode() -> List[PriceOption]:
+        if not smscode_enabled or not smscode_api or not smscode_api.api_key:
+            return []
         try:
-            sc_opts = await fetch_smscode_prices_for_service(context, smscode_api, service_code, name, lang)
-            opts.extend(sc_opts)
+            return await fetch_smscode_prices_for_service(context, smscode_api, service_code, name, lang)
         except Exception as e:
             logger.warning("Failed to fetch SMSCode prices for %s: %s", service_code, e)
+            return []
+
+    results = await asyncio.gather(_fetch_bower(), _fetch_smscode(), return_exceptions=True)
+    opts: List[PriceOption] = []
+    for r in results:
+        if isinstance(r, list):
+            opts.extend(r)
 
     user_id = query.from_user.id if query and query.from_user else 0
     user_row = await adb(db.get, user_id) if user_id else None
@@ -3269,7 +3303,14 @@ async def show_country_letter_picker(
 
     if opts is None:
         opts = context.user_data.get(f"price_{service_code}")
-    if not opts:
+    has_bower = any(o.panel == "SMSBower" for o in (opts or []))
+    has_smscode = any(o.panel == "SMSCode" for o in (opts or []))
+    need_reload = (
+        not opts
+        or (bower_on and not has_bower)
+        or (smscode_on and not has_smscode)
+    )
+    if need_reload:
         opts = await load_all_prices_for_service(query, context, lang, service_code)
         context.user_data[f"price_{service_code}"] = opts
     elif opts:
@@ -3356,7 +3397,14 @@ async def show_country_list(
 
     if opts is None:
         opts = context.user_data.get(f"price_{service_code}")
-    if not opts:
+    has_bower = any(o.panel == "SMSBower" for o in (opts or []))
+    has_smscode = any(o.panel == "SMSCode" for o in (opts or []))
+    need_reload = (
+        not opts
+        or (bower_on and not has_bower)
+        or (smscode_on and not has_smscode)
+    )
+    if need_reload:
         opts = await load_all_prices_for_service(query, context, lang, service_code)
         context.user_data[f"price_{service_code}"] = opts
     elif opts:
@@ -4227,6 +4275,8 @@ async def cb_country_select(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if smscode_on and smscode_api and smscode_api.api_key and not any(o.panel == "SMSCode" for _, o in country_opts):
         c_iso_map = context.application.bot_data.get("smscode_countries_by_iso", {})
         sc_cid = c_iso_map.get(target_key) or c_iso_map.get(target_key.lower())
+        if not sc_cid and target_key.isdigit():
+            sc_cid = int(target_key)
         if sc_cid:
             try:
                 sc_name = opts[0].service_name if opts else service_code
@@ -5428,6 +5478,46 @@ async def post_init(app: Application) -> None:
             app.bot_data["country_cache"] = {"ts": now, "items": countries}
     except Exception as e:
         logger.warning("cache warm-up failed: %s", e)
+
+    smscode_api: Optional[SMSCodeAPI] = app.bot_data.get("smscode_api")
+    if smscode_api and smscode_api.api_key:
+        try:
+            sc_c_res, sc_s_res = await asyncio.gather(
+                smscode_api.get_countries(),
+                smscode_api.get_services(),
+                return_exceptions=True,
+            )
+            if not isinstance(sc_c_res, Exception) and isinstance(sc_c_res, dict):
+                c_items = sc_c_res.get("data", [])
+                c_cache = {}
+                c_iso_map = {}
+                for c in c_items:
+                    if isinstance(c, dict) and "id" in c:
+                        cid = c["id"]
+                        c_cache[cid] = c
+                        c_cache[str(cid)] = c
+                        iso = str(c.get("code") or "").strip().upper()
+                        if iso:
+                            c_iso_map[iso] = cid
+                            c_iso_map[iso.lower()] = cid
+                        name = str(c.get("name") or "").strip().lower()
+                        if name:
+                            c_iso_map[name] = cid
+                app.bot_data["smscode_countries"] = c_cache
+                app.bot_data["smscode_countries_by_iso"] = c_iso_map
+            if not isinstance(sc_s_res, Exception) and isinstance(sc_s_res, dict):
+                s_items = sc_s_res.get("data", [])
+                s_cache = {}
+                for s in s_items:
+                    n_clean = re.sub(r"[^a-z0-9]", "", str(s.get("name", "")).lower())
+                    c_clean = re.sub(r"[^a-z0-9]", "", str(s.get("code", "")).lower())
+                    if n_clean:
+                        s_cache[n_clean] = s["id"]
+                    if c_clean:
+                        s_cache[c_clean] = s["id"]
+                app.bot_data["smscode_services_map"] = s_cache
+        except Exception as e:
+            logger.warning("SMSCode warm-up failed: %s", e)
 
     for row in await adb(db.list_active_activations):
         try:
