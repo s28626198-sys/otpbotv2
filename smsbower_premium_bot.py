@@ -12,7 +12,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from urllib.parse import urlparse
 
@@ -65,6 +65,11 @@ except Exception:
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 API_KEY = os.getenv("TEMPLINE_API_KEY", os.getenv("SMSBOWER_API_KEY", ""))
 BASE_URL = os.getenv("TEMPLINE_BASE_URL", os.getenv("SMSBOWER_BASE_URL", "https://smsbower.app/web/stubs/handler_api.php"))
+SMSCODE_API_KEY = os.getenv(
+    "SMSCODE_API_KEY",
+    os.getenv("SMSCODE_TOKEN", "14e9e5086d6b5ee4ddacd461ffcb1bb3d162b6e4b80f20210953e14fa3347220"),
+).strip()
+SMSCODE_BASE_URL = os.getenv("SMSCODE_BASE_URL", "https://api.smscode.gg").rstrip("/")
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "5742928021"))
 POLL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "4"))
 SEARCH_STATE = 1
@@ -1988,6 +1993,129 @@ class TemplineAPI:
         raise RuntimeError(f"request failed: {last}")
 
 
+class SMSCodeAPI:
+    def __init__(self, api_key: str, base_url: str = "https://api.smscode.gg"):
+        self.api_key = (api_key or "").strip()
+        self.base_url = (base_url or "https://api.smscode.gg").rstrip("/")
+        self.http = httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=6.0), follow_redirects=True)
+
+    def _headers(self, idempotency_key: Optional[str] = None) -> Dict[str, str]:
+        h = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        if idempotency_key:
+            h["Idempotency-Key"] = str(idempotency_key)
+        return h
+
+    async def close(self) -> None:
+        await self.http.aclose()
+
+    async def get_balance(self) -> Dict[str, Any]:
+        if not self.api_key:
+            return {"success": False, "error": "API key not set"}
+        # Attempt v2 (returns USD amount and canonical IDR)
+        try:
+            url = f"{self.base_url}/v2/balance"
+            r = await self.http.get(url, headers=self._headers())
+            if r.status_code == 200:
+                payload = r.json()
+                binfo = payload.get("data", {}).get("balance", {})
+                usd_amt = str(binfo.get("amount", "0.00"))
+                idr_amt = binfo.get("canonical_amount", 0)
+                return {
+                    "success": True,
+                    "amount_usd": usd_amt,
+                    "amount_idr": idr_amt,
+                    "currency": "USD",
+                }
+        except Exception as e:
+            logger.warning("SMSCode v2 balance request failed: %s", e)
+
+        # Fallback to v1 (returns IDR integer balance)
+        try:
+            url = f"{self.base_url}/v1/balance"
+            r = await self.http.get(url, headers=self._headers())
+            if r.status_code == 200:
+                payload = r.json()
+                bal_idr = payload.get("data", {}).get("balance", 0)
+                return {
+                    "success": True,
+                    "amount_usd": "0.00",
+                    "amount_idr": bal_idr,
+                    "currency": "IDR",
+                }
+            return {"success": False, "error": f"HTTP {r.status_code}"}
+        except Exception as e:
+            logger.warning("SMSCode v1 balance request failed: %s", e)
+            return {"success": False, "error": str(e)}
+
+    async def get_active_orders(self) -> Dict[str, Any]:
+        url = f"{self.base_url}/v2/orders/active"
+        r = await self.http.get(url, headers=self._headers())
+        r.raise_for_status()
+        return r.json()
+
+    async def get_order(self, order_id: Union[int, str]) -> Dict[str, Any]:
+        url = f"{self.base_url}/v2/orders/{order_id}"
+        r = await self.http.get(url, headers=self._headers())
+        r.raise_for_status()
+        return r.json()
+
+    async def create_order(
+        self,
+        catalog_product_id: Optional[int] = None,
+        product_id: Optional[int] = None,
+        max_price: Optional[str] = None,
+        min_price: Optional[str] = None,
+        operator_id: Optional[int] = None,
+        quantity: int = 1,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        url = f"{self.base_url}/v2/orders/create"
+        body: Dict[str, Any] = {"quantity": quantity}
+        if product_id is not None:
+            body["product_id"] = product_id
+        if catalog_product_id is not None:
+            body["catalog_product_id"] = catalog_product_id
+        if max_price is not None:
+            body["max_price"] = str(max_price)
+        if min_price is not None:
+            body["min_price"] = str(min_price)
+        if operator_id is not None:
+            body["operator_id"] = operator_id
+
+        r = await self.http.post(url, headers=self._headers(idempotency_key), json=body)
+        r.raise_for_status()
+        return r.json()
+
+    async def cancel_order(self, order_id: Union[int, str]) -> Dict[str, Any]:
+        url = f"{self.base_url}/v2/orders/cancel"
+        r = await self.http.post(url, headers=self._headers(), json={"id": int(order_id)})
+        r.raise_for_status()
+        return r.json()
+
+    async def finish_order(self, order_id: Union[int, str]) -> Dict[str, Any]:
+        url = f"{self.base_url}/v2/orders/finish"
+        r = await self.http.post(url, headers=self._headers(), json={"id": int(order_id)})
+        r.raise_for_status()
+        return r.json()
+
+    async def get_countries(self) -> Dict[str, Any]:
+        url = f"{self.base_url}/v1/catalog/countries"
+        r = await self.http.get(url, headers=self._headers())
+        r.raise_for_status()
+        return r.json()
+
+    async def get_services(self, country_id: Optional[int] = None) -> Dict[str, Any]:
+        url = f"{self.base_url}/v1/catalog/services"
+        params = {"country_id": country_id} if country_id is not None else {}
+        r = await self.http.get(url, headers=self._headers(), params=params)
+        r.raise_for_status()
+        return r.json()
+
+
 def parse_services(payload: Any) -> List[Dict[str, str]]:
     items: List[Dict[str, str]] = []
     if isinstance(payload, dict):
@@ -2496,6 +2624,7 @@ async def show_prices(query, context: ContextTypes.DEFAULT_TYPE, lang: str, serv
 async def start_poll_task(app: Application, aid: str) -> None:
     db = app.bot_data["db"]
     api: TemplineAPI = app.bot_data["api"]
+    smscode_api: Optional[SMSCodeAPI] = app.bot_data.get("smscode_api")
     tasks: Dict[str, asyncio.Task] = app.bot_data["tasks"]
 
     async def run() -> None:
@@ -2525,10 +2654,29 @@ async def start_poll_task(app: Application, aid: str) -> None:
             chat_id = int(act.get("chat_id"))
             user_row = await adb(db.get, user_id) or {}
             lang = lang_from_code(user_row.get("lang"))
-            try:
-                st, val = parse_status(await api.call("getStatus", id=aid))
-            except Exception:
-                continue
+            is_smscode = bool(act.get("provider") == "smscode" or str(aid).startswith("sc_"))
+            if is_smscode and smscode_api:
+                try:
+                    raw_id = str(aid).removeprefix("sc_")
+                    order_res = await smscode_api.get_order(raw_id)
+                    order_data = order_res.get("data", {}) if isinstance(order_res, dict) else {}
+                    st_code = str(order_data.get("status", "")).upper()
+                    if st_code in {"RECEIVED", "COMPLETED", "FINISHED"} and order_data.get("otp_code"):
+                        st = "OK"
+                        val = str(order_data.get("otp_code"))
+                    elif st_code in {"CANCELLED", "TIMEOUT", "EXPIRED", "FAILED"}:
+                        st = "CANCEL"
+                        val = None
+                    else:
+                        st = "WAIT"
+                        val = None
+                except Exception:
+                    continue
+            else:
+                try:
+                    st, val = parse_status(await api.call("getStatus", id=aid))
+                except Exception:
+                    continue
             if st == "WAIT":
                 continue
             if st == "OK" and val:
@@ -2559,10 +2707,17 @@ async def start_poll_task(app: Application, aid: str) -> None:
                     parse_mode=ParseMode.MARKDOWN_V2,
                     reply_markup=kb,
                 )
-                try:
-                    await api.call("setStatus", id=aid, status=6)
-                except Exception:
-                    pass
+                if is_smscode and smscode_api:
+                    try:
+                        raw_id = str(aid).removeprefix("sc_")
+                        await smscode_api.finish_order(raw_id)
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        await api.call("setStatus", id=aid, status=6)
+                    except Exception:
+                        pass
                 await adb(db.set_activation_status, aid, "otp_received", otp)
                 break
             if st == "CANCEL":
@@ -3250,6 +3405,72 @@ async def cb_another(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await start_poll_task(context.application, aid)
 
 
+def format_admin_balance(
+    bower_bal: Optional[str],
+    bower_err: Optional[str],
+    code_usd: Optional[str],
+    code_idr: Optional[int],
+    code_err: Optional[str],
+    lang: str = "en",
+) -> str:
+    bower_line = f"${bower_bal} USD" if bower_bal is not None else f"❌ {bower_err or 'Error'}"
+    if code_usd is not None:
+        code_line = f"${code_usd} USD"
+        if code_idr:
+            code_line += f" (Rp {code_idr:,})"
+    else:
+        code_line = f"❌ {code_err or 'Error'}"
+
+    if lang == "bn":
+        title = "💰 প্যানেল ব্যালেন্স বিবরণ"
+    elif lang == "hi":
+        title = "💰 पैनल बैलेंस विवरण"
+    elif lang == "ar":
+        title = "💰 رصيد لوحات التزويد"
+    elif lang == "ru":
+        title = "💰 Баланс провайдеров"
+    else:
+        title = "💰 Panels Balance Overview"
+
+    return (
+        f"{title}\n"
+        f"─────────────────────\n"
+        f"🔹 SMSBower: {bower_line}\n"
+        f"🔹 SMSCode: {code_line}\n"
+        f"─────────────────────"
+    )
+
+
+async def _get_panel_balances(
+    context: ContextTypes.DEFAULT_TYPE,
+) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[int], Optional[str]]:
+    api: TemplineAPI = context.application.bot_data["api"]
+    smscode_api: Optional[SMSCodeAPI] = context.application.bot_data.get("smscode_api")
+
+    async def _fetch_bower():
+        try:
+            return parse_balance(await api.call("getBalance"))
+        except Exception as e:
+            return None, str(e)
+
+    async def _fetch_smscode():
+        if not smscode_api or not smscode_api.api_key:
+            return None, 0, "Not Configured"
+        try:
+            res = await smscode_api.get_balance()
+            if not res.get("success"):
+                return None, 0, res.get("error") or "Error"
+            return res.get("amount_usd"), res.get("amount_idr", 0), None
+        except Exception as e:
+            return None, 0, str(e)
+
+    (bower_bal, bower_err), (code_usd, code_idr, code_err) = await asyncio.gather(
+        _fetch_bower(),
+        _fetch_smscode(),
+    )
+    return bower_bal, bower_err, code_usd, code_idr, code_err
+
+
 async def h_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     db = context.application.bot_data["db"]
     _, _, lang, role, _ = await ensure_user(update, db)
@@ -3261,20 +3482,10 @@ async def h_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             reply_markup=main_menu(lang, role),
         )
         return
-    api: TemplineAPI = context.application.bot_data["api"]
-    try:
-        bal, err = parse_balance(await api.call("getBalance"))
-    except Exception:
-        bal, err = None, "UNKNOWN"
-    if err or bal is None:
-        await update.effective_message.reply_text(
-            md(api_error(lang, err or "UNKNOWN")),
-            parse_mode=ParseMode.MARKDOWN_V2,
-            reply_markup=main_menu(lang, role),
-        )
-        return
+    bower_bal, bower_err, code_usd, code_idr, code_err = await _get_panel_balances(context)
+    text = format_admin_balance(bower_bal, bower_err, code_usd, code_idr, code_err, lang=lang)
     kb = InlineKeyboardMarkup([[InlineKeyboardButton(tt(lang, "refresh_bal"), callback_data="br")]])
-    await update.effective_message.reply_text(md(tt(lang, "bal", balance=bal)), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=kb)
+    await safe_reply_markdown(update.effective_message, md(text), reply_markup=kb)
 
 
 async def cb_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3294,26 +3505,33 @@ async def cb_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             reply_markup=main_menu(lang, role),
         )
         return
-    api: TemplineAPI = context.application.bot_data["api"]
-    try:
-        bal, err = parse_balance(await api.call("getBalance"))
-    except Exception:
-        bal, err = None, "UNKNOWN"
-    if err or bal is None:
-        await q.message.reply_text(md(api_error(lang, err or "UNKNOWN")), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=main_menu(lang, role))
-        return
+    bower_bal, bower_err, code_usd, code_idr, code_err = await _get_panel_balances(context)
+    text = format_admin_balance(bower_bal, bower_err, code_usd, code_idr, code_err, lang=lang)
     kb = InlineKeyboardMarkup([[InlineKeyboardButton(tt(lang, "refresh_bal"), callback_data="br")]])
-    await q.message.reply_text(md(tt(lang, "bal", balance=bal)), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=kb)
+    try:
+        await q.edit_message_text(md(text), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=kb)
+    except Exception:
+        await safe_reply_markdown(q.message, md(text), reply_markup=kb)
 
 
 async def cancel_core(context: ContextTypes.DEFAULT_TYPE, aid: str, user_id: Optional[int] = None) -> None:
     db = context.application.bot_data["db"]
     api: TemplineAPI = context.application.bot_data["api"]
+    smscode_api: Optional[SMSCodeAPI] = context.application.bot_data.get("smscode_api")
     tasks: Dict[str, asyncio.Task] = context.application.bot_data["tasks"]
-    try:
-        await api.call("setStatus", id=aid, status=8)
-    except Exception:
-        pass
+    act = await adb(db.get_activation, str(aid))
+    is_smscode = bool(act and (act.get("provider") == "smscode" or str(aid).startswith("sc_")))
+    if is_smscode and smscode_api:
+        try:
+            raw_id = str(aid).removeprefix("sc_")
+            await smscode_api.cancel_order(raw_id)
+        except Exception:
+            pass
+    else:
+        try:
+            await api.call("setStatus", id=aid, status=8)
+        except Exception:
+            pass
     tsk = tasks.get(str(aid))
     if tsk and not tsk.done():
         tsk.cancel()
@@ -3928,6 +4146,9 @@ async def post_shutdown(app: Application) -> None:
     api: TemplineAPI = app.bot_data.get("api")
     if api:
         await api.close()
+    smscode_api: Optional[SMSCodeAPI] = app.bot_data.get("smscode_api")
+    if smscode_api:
+        await smscode_api.close()
 
 
 async def app_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4004,6 +4225,7 @@ def build_app() -> Application:
     )
     app.bot_data["db"] = SupabaseRESTDB()
     app.bot_data["api"] = TemplineAPI(API_KEY, BASE_URL)
+    app.bot_data["smscode_api"] = SMSCodeAPI(SMSCODE_API_KEY, SMSCODE_BASE_URL)
     app.bot_data["tasks"] = {}
 
     app.add_handler(TypeHandler(Update, log_raw_update), group=-2)
@@ -4156,9 +4378,10 @@ def main() -> None:
         pass
 
     logger.info(
-        "Startup config: ADMIN_USER_ID=%s | BASE_URL=%s | SUPABASE_URL=%s | MODE=supabase-py",
+        "Startup config: ADMIN_USER_ID=%s | BASE_URL=%s | SMSCODE_BASE_URL=%s | SUPABASE_URL=%s | MODE=supabase-py",
         ADMIN_USER_ID,
         BASE_URL,
+        SMSCODE_BASE_URL,
         SUPABASE_URL,
     )
     use_webhook = should_use_webhook()
