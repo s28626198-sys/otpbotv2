@@ -62,12 +62,12 @@ except Exception:
     HAS_COPY = False
 
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-API_KEY = os.getenv("TEMPLINE_API_KEY", os.getenv("SMSBOWER_API_KEY", "GPdBoyL82ErBX9ImR6s8GdO3k2QSnEMY"))
-BASE_URL = os.getenv("TEMPLINE_BASE_URL", os.getenv("SMSBOWER_BASE_URL", "https://smsbower.page/stubs/handler_api.php"))
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+API_KEY = os.getenv("TEMPLINE_API_KEY", os.getenv("SMSBOWER_API_KEY", "")).strip()
+BASE_URL = os.getenv("TEMPLINE_BASE_URL", os.getenv("SMSBOWER_BASE_URL", "https://smsbower.page/stubs/handler_api.php")).rstrip("/")
 SMSCODE_API_KEY = os.getenv(
     "SMSCODE_API_KEY",
-    os.getenv("SMSCODE_TOKEN", "14e9e5086d6b5ee4ddacd461ffcb1bb3d162b6e4b80f20210953e14fa3347220"),
+    os.getenv("SMSCODE_TOKEN", ""),
 ).strip()
 SMSCODE_BASE_URL = os.getenv("SMSCODE_BASE_URL", "https://api.smscode.gg").rstrip("/")
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "5742928021"))
