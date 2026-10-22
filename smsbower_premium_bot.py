@@ -63,8 +63,8 @@ except Exception:
 
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-API_KEY = os.getenv("TEMPLINE_API_KEY", os.getenv("SMSBOWER_API_KEY", ""))
-BASE_URL = os.getenv("TEMPLINE_BASE_URL", os.getenv("SMSBOWER_BASE_URL", "https://smsbower.app/web/stubs/handler_api.php"))
+API_KEY = os.getenv("TEMPLINE_API_KEY", os.getenv("SMSBOWER_API_KEY", "GPdBoyL82ErBX9ImR6s8GdO3k2QSnEMY"))
+BASE_URL = os.getenv("TEMPLINE_BASE_URL", os.getenv("SMSBOWER_BASE_URL", "https://smsbower.page/stubs/handler_api.php"))
 SMSCODE_API_KEY = os.getenv(
     "SMSCODE_API_KEY",
     os.getenv("SMSCODE_TOKEN", "14e9e5086d6b5ee4ddacd461ffcb1bb3d162b6e4b80f20210953e14fa3347220"),
@@ -168,6 +168,7 @@ TR = {
         "no_activation_err": "⚠️ Activation not found.",
         "early_cancel_denied": "⏱️ Early cancel denied.",
         "admin_only": "🔒 Admin only bot. Access denied.",
+        "no_numbers": "⚠️ No numbers currently available for this service and country. Please try another provider or check back shortly.",
     },
     "bn": {
         "m_popular": "⭐ পপুলার সার্ভিস",
@@ -185,6 +186,14 @@ TR = {
         "services_empty": "⚠️ কোনো সার্ভিস পাওয়া যায়নি।",
         "unknown": "⚠️ নিচের মেনু বাটন ব্যবহার করুন।",
         "admin_only": "🔒 এই বট শুধু এডমিনের জন্য। আপনার এক্সেস নেই।",
+        "generic_fail": "❌ অনুরোধটি ব্যর্থ হয়েছে। অনুগ্রহ করে আবার চেষ্টা করুন।",
+        "no_numbers": "⚠️ বর্তমানে এই সার্ভিস/কান্ট্রির জন্য কোনো নাম্বার খালি নেই। অনুগ্রহ করে অন্য কান্ট্রি চেষ্টা করুন বা কিছুক্ষণ পর ট্রাই করুন।",
+        "no_balance": "💸 পর্যাপ্ত ব্যালেন্স নেই।",
+        "bad_key": "🚫 ইনভ্যালিড এপিআই কি।",
+        "bad_service": "🚫 সার্ভিস পাওয়া যায়নি।",
+        "bad_country": "🚫 কান্ট্রি পাওয়া যায়নি।",
+        "no_activation_err": "⚠️ কোনো এক্টিভেশন নেই।",
+        "early_cancel_denied": "⏱️ এত দ্রুত বাতিল করা যাবে না।",
     },
     "hi": {
         "m_popular": "⭐ लोकप्रिय सेवाएं",
@@ -202,6 +211,9 @@ TR = {
         "services_empty": "⚠️ अभी कोई सर्विस उपलब्ध नहीं है।",
         "unknown": "⚠️ नीचे मेनू बटन उपयोग करें।",
         "admin_only": "🔒 यह बॉट केवल एडमिन के लिए है।",
+        "generic_fail": "❌ अनुरोध विफल रहा। पुन: प्रयास करें।",
+        "no_numbers": "⚠️ वर्तमान में इस सेवा और देश के लिए कोई नंबर उपलब्ध नहीं है। कृपया कोई अन्य देश या प्रदाता आज़माएं।",
+        "no_balance": "💸 अपर्याप्त बैलेंस।",
     },
     "ar": {
         "m_popular": "⭐ الخدمات الشائعة",
@@ -308,6 +320,8 @@ ERR_MAP = {
     "NO_BALANCE": "no_balance",
     "NO_ACTIVATION": "no_activation_err",
     "EARLY_CANCEL_DENIED": "early_cancel_denied",
+    "NO_NUMBERS": "no_numbers",
+    "NO_NUMBER": "no_numbers",
 }
 
 COUNTRY_NAME_ALIASES = {
@@ -2012,14 +2026,15 @@ class TemplineAPI:
                 return
             out.append(u)
 
-        add(primary)
-        if "smsbower.page/stubs/handler_api.php" in primary:
-            add(primary.replace("https://smsbower.page/stubs/handler_api.php", "https://smsbower.app/web/stubs/handler_api.php"))
-        elif "smsbower.app/web/stubs/handler_api.php" in primary:
-            add(primary.replace("https://smsbower.app/web/stubs/handler_api.php", "https://smsbower.page/stubs/handler_api.php"))
-        else:
-            add("https://smsbower.app/web/stubs/handler_api.php")
+        clean_primary = str(primary or "").strip()
+        if "smsbower.app" in clean_primary:
+            # smsbower.app currently redirects to /login; prioritize smsbower.page
             add("https://smsbower.page/stubs/handler_api.php")
+            add(clean_primary)
+        else:
+            add(clean_primary)
+            add("https://smsbower.page/stubs/handler_api.php")
+            add("https://smsbower.app/web/stubs/handler_api.php")
 
         extras = os.getenv("TEMPLINE_FALLBACK_BASE_URLS", "").strip()
         if extras:
@@ -2039,7 +2054,10 @@ class TemplineAPI:
                 try:
                     r = await self.http.get(base, params=params)
                     r.raise_for_status()
-                    return json_maybe(r.text.strip())
+                    txt = r.text.strip()
+                    if txt.lower().startswith("<!doctype") or "<html" in txt.lower():
+                        raise RuntimeError(f"HTML response received instead of API response from {base}")
+                    return json_maybe(txt)
                 except Exception as e:
                     last = e
                     await asyncio.sleep(0.35)
@@ -2452,6 +2470,8 @@ def _collect_price_nodes(rows: List[Dict[str, Any]], country: str, node: Any, hi
                 pid = hint
             if pname is None and hint and not hint.isdigit():
                 pname = hint
+            if str(pid or "").strip() in {"0", "none", "null"}:
+                pid = None
             rows.append({"country": country, "price": str(price), "pid": pid, "pname": pname})
         for k, v in node.items():
             if isinstance(v, (dict, list)):
@@ -3864,15 +3884,36 @@ async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 err = str(e)
     else:
         try:
+            clean_pid = str(opt.provider_id or "").strip()
             buy_args: Dict[str, Any] = {
                 "service": opt.service_code,
                 "country": opt.country_code,
-                "providerIds": opt.provider_id,
             }
+            if clean_pid and clean_pid not in {"0", "none", "null", "false"}:
+                buy_args["providerIds"] = clean_pid
+
             if base_cost > 0:
-                buy_args["fixPrice"] = money(base_cost)
+                cost_str = money(base_cost)
+                buy_args["maxPrice"] = cost_str
+                buy_args["fixPrice"] = cost_str
+
             payload = await api.call("getNumber", **buy_args)
             aid, phone, err = parse_number(payload)
+
+            if (err == "NO_NUMBERS" or not aid) and "providerIds" in buy_args:
+                logger.info(
+                    "getNumber with providerIds=%s returned %s, retrying without providerIds for user=%s",
+                    clean_pid,
+                    err,
+                    q.from_user.id,
+                )
+                buy_args.pop("providerIds", None)
+                payload_fallback = await api.call("getNumber", **buy_args)
+                aid_fb, phone_fb, err_fb = parse_number(payload_fallback)
+                if aid_fb and phone_fb:
+                    aid, phone, err = aid_fb, phone_fb, None
+                elif err_fb:
+                    err = err_fb
         except Exception as e:
             logger.warning("getNumber failed (buy) user=%s args=%s err=%s", q.from_user.id, buy_args, e)
             aid, phone, err = None, None, "UNKNOWN"
@@ -4003,15 +4044,36 @@ async def cb_another(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 err = str(e)
     else:
         try:
+            clean_pid = str(provider_id or "").strip()
             buy_args: Dict[str, Any] = {
                 "service": service_code,
                 "country": country_code,
-                "providerIds": provider_id,
             }
+            if clean_pid and clean_pid not in {"0", "none", "null", "false"}:
+                buy_args["providerIds"] = clean_pid
+
             if base_cost > 0:
-                buy_args["fixPrice"] = money(base_cost)
+                cost_str = money(base_cost)
+                buy_args["maxPrice"] = cost_str
+                buy_args["fixPrice"] = cost_str
+
             payload = await api.call("getNumber", **buy_args)
             aid, phone, err = parse_number(payload)
+
+            if (err == "NO_NUMBERS" or not aid) and "providerIds" in buy_args:
+                logger.info(
+                    "getNumber (another) with providerIds=%s returned %s, retrying without providerIds for user=%s",
+                    clean_pid,
+                    err,
+                    q.from_user.id,
+                )
+                buy_args.pop("providerIds", None)
+                payload_fallback = await api.call("getNumber", **buy_args)
+                aid_fb, phone_fb, err_fb = parse_number(payload_fallback)
+                if aid_fb and phone_fb:
+                    aid, phone, err = aid_fb, phone_fb, None
+                elif err_fb:
+                    err = err_fb
         except Exception as e:
             logger.warning("getNumber failed (another) user=%s args=%s err=%s", q.from_user.id, buy_args, e)
             aid, phone, err = None, None, "UNKNOWN"
