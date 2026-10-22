@@ -2130,31 +2130,57 @@ class SMSCodeAPI:
         url = f"{self.base_url}/v2/orders/create"
         body: Dict[str, Any] = {"quantity": quantity}
         if product_id is not None:
-            body["product_id"] = product_id
-        if catalog_product_id is not None:
-            body["catalog_product_id"] = catalog_product_id
-        if max_price is not None:
-            body["max_price"] = str(max_price)
-        if min_price is not None:
-            body["min_price"] = str(min_price)
-        if operator_id is not None:
-            body["operator_id"] = operator_id
+            body["product_id"] = int(product_id)
+        elif catalog_product_id is not None:
+            body["catalog_product_id"] = int(catalog_product_id)
+            if max_price is not None:
+                body["max_price"] = str(max_price)
+            if min_price is not None:
+                body["min_price"] = str(min_price)
+            if operator_id is not None:
+                body["operator_id"] = int(operator_id)
+        else:
+            raise ValueError("Either product_id or catalog_product_id must be provided")
 
         r = await self.http.post(url, headers=self._headers(idempotency_key), json=body)
-        r.raise_for_status()
-        return r.json()
+        try:
+            res_data = r.json()
+        except Exception:
+            res_data = {}
+        if r.status_code != 200:
+            err_obj = res_data.get("error") if isinstance(res_data, dict) else None
+            err_msg = err_obj.get("message") if isinstance(err_obj, dict) else (err_obj or f"HTTP_{r.status_code}")
+            logger.warning("SMSCode create_order HTTP %s: %s (sent body: %s)", r.status_code, res_data, body)
+            return {"success": False, "error": str(err_msg)}
+        return res_data
 
     async def cancel_order(self, order_id: Union[int, str]) -> Dict[str, Any]:
         url = f"{self.base_url}/v2/orders/cancel"
         r = await self.http.post(url, headers=self._headers(), json={"id": int(order_id)})
-        r.raise_for_status()
-        return r.json()
+        try:
+            res_data = r.json()
+        except Exception:
+            res_data = {}
+        if r.status_code != 200:
+            err_obj = res_data.get("error") if isinstance(res_data, dict) else None
+            err_msg = err_obj.get("message") if isinstance(err_obj, dict) else (err_obj or f"HTTP_{r.status_code}")
+            logger.warning("SMSCode cancel_order HTTP %s: %s", r.status_code, res_data)
+            return {"success": False, "error": str(err_msg)}
+        return res_data
 
     async def finish_order(self, order_id: Union[int, str]) -> Dict[str, Any]:
         url = f"{self.base_url}/v2/orders/finish"
         r = await self.http.post(url, headers=self._headers(), json={"id": int(order_id)})
-        r.raise_for_status()
-        return r.json()
+        try:
+            res_data = r.json()
+        except Exception:
+            res_data = {}
+        if r.status_code != 200:
+            err_obj = res_data.get("error") if isinstance(res_data, dict) else None
+            err_msg = err_obj.get("message") if isinstance(err_obj, dict) else (err_obj or f"HTTP_{r.status_code}")
+            logger.warning("SMSCode finish_order HTTP %s: %s", r.status_code, res_data)
+            return {"success": False, "error": str(err_msg)}
+        return res_data
 
     async def get_countries(self) -> Dict[str, Any]:
         url = f"{self.base_url}/v1/catalog/countries"
@@ -3053,10 +3079,10 @@ async def start_poll_task(app: Application, aid: str) -> None:
                     order_res = await smscode_api.get_order(raw_id)
                     order_data = order_res.get("data", {}) if isinstance(order_res, dict) else {}
                     st_code = str(order_data.get("status", "")).upper()
-                    if st_code in {"RECEIVED", "COMPLETED", "FINISHED"} and order_data.get("otp_code"):
+                    if st_code in {"RECEIVED", "COMPLETED", "FINISHED", "OTP_RECEIVED"} and order_data.get("otp_code"):
                         st = "OK"
                         val = str(order_data.get("otp_code"))
-                    elif st_code in {"CANCELLED", "TIMEOUT", "EXPIRED", "FAILED"}:
+                    elif st_code in {"CANCELLED", "CANCELED", "TIMEOUT", "EXPIRED", "FAILED"}:
                         st = "CANCEL"
                         val = None
                     else:
@@ -3823,9 +3849,9 @@ async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             try:
                 buy_res = await smscode_api.create_order(
-                    catalog_product_id=opt.smscode_catalog_id,
                     product_id=opt.smscode_product_id,
-                    max_price=str(opt.base_price or opt.price),
+                    catalog_product_id=opt.smscode_catalog_id if not opt.smscode_product_id else None,
+                    max_price=str(opt.base_price or opt.price) if not opt.smscode_product_id else None,
                 )
                 orders = buy_res.get("data", {}).get("orders", []) if isinstance(buy_res, dict) else []
                 if orders:
@@ -3971,9 +3997,9 @@ async def cb_another(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         else:
             try:
                 buy_res = await smscode_api.create_order(
-                    catalog_product_id=opt.smscode_catalog_id,
                     product_id=opt.smscode_product_id,
-                    max_price=str(opt.base_price or opt.price),
+                    catalog_product_id=opt.smscode_catalog_id if not opt.smscode_product_id else None,
+                    max_price=str(opt.base_price or opt.price) if not opt.smscode_product_id else None,
                 )
                 orders = buy_res.get("data", {}).get("orders", []) if isinstance(buy_res, dict) else []
                 if orders:
