@@ -782,10 +782,11 @@ class PriceOption:
     panel: str = "SMSBower"
     smscode_catalog_id: Optional[int] = None
     smscode_product_id: Optional[int] = None
+    count: Optional[int] = None
 
     def label_for(self, is_admin: bool = False) -> str:
         base = f"{to_flag(self.country_iso2)} {self.country_name}"
-        if self.provider_name:
+        if self.provider_name and self.provider_name != "Any Provider":
             base += f" • {self.provider_name}"
         tag = f" [{self.panel}]" if is_admin else ""
         return f"{base} - ${self.price}{tag}"
@@ -2580,7 +2581,14 @@ def _collect_price_nodes(rows: List[Dict[str, Any]], country: str, node: Any, hi
                 pname = hint
             if str(pid or "").strip() in {"0", "none", "null"}:
                 pid = None
-            rows.append({"country": country, "price": str(price), "pid": pid, "pname": pname})
+            count_val = node.get("count") or node.get("quantity") or node.get("qty")
+            count_int = None
+            if count_val is not None:
+                try:
+                    count_int = int(count_val)
+                except Exception:
+                    count_int = None
+            rows.append({"country": country, "price": str(price), "pid": pid, "pname": pname, "count": count_int})
         for k, v in node.items():
             if isinstance(v, (dict, list)):
                 _collect_price_nodes(rows, country, v, str(k))
@@ -2636,6 +2644,7 @@ def parse_prices(
                 provider_name=str(r.get("pname")) if r.get("pname") else None,
                 price=price,
                 base_price=price,
+                count=r.get("count"),
             )
         )
     out.sort(key=lambda x: (float(x.price) if re.match(r"^\d+(\.\d+)?$", x.price) else 999999.0, x.country_name))
@@ -2664,6 +2673,7 @@ def apply_role_prices(opts: List[PriceOption], role: str, profit_pct: Decimal) -
                 panel=x.panel,
                 smscode_catalog_id=x.smscode_catalog_id,
                 smscode_product_id=x.smscode_product_id,
+                count=x.count,
             )
         )
     return out
@@ -2896,9 +2906,71 @@ async def fetch_smscode_prices_for_service(
                 panel="SMSCode",
                 smscode_catalog_id=p.get("catalog_product_id"),
                 smscode_product_id=p.get("id"),
+                count=int(avail) if avail is not None else None,
             )
         )
     return out
+
+
+INDEX_EMOJIS = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+
+
+def format_count(cnt: Optional[int], lang: str = "en") -> str:
+    if cnt is None or cnt <= 0:
+        return ""
+    if cnt >= 1000:
+        k_val = round(cnt / 1000, 1)
+        k_str = f"{k_val:g}k"
+    else:
+        k_str = str(cnt)
+    if lang == "bn":
+        return f"{k_str} টি"
+    return f"{k_str} pcs"
+
+
+def format_count_full(cnt: Optional[int], lang: str = "en") -> str:
+    if cnt is None or cnt <= 0:
+        return ""
+    if lang == "bn":
+        return f"{cnt:,} টি খালি"
+    return f"{cnt:,} available"
+
+
+def price_page_text(
+    opts: List[PriceOption],
+    service_name: str,
+    page: int,
+    lang: str,
+    is_admin: bool = False,
+    sort_mode: str = "price",
+) -> str:
+    pages = (len(opts) - 1) // PAGE_SIZE + 1 if opts else 1
+    start, end = page * PAGE_SIZE, (page + 1) * PAGE_SIZE
+    current_slice = opts[start:end]
+    sort_info = "💵 প্রাইস অনুযায়ী" if lang == "bn" else "💵 By Lowest Price"
+    if lang == "bn":
+        header = f"🌍 *{md(service_name)} এর উপলব্ধ নাম্বারসমূহ*\n📄 *পৃষ্ঠা {page + 1}/{pages} • {sort_info}:*\n"
+    else:
+        header = f"🌍 *Available Numbers for {md(service_name)}*\n📄 *Page {page + 1}/{pages} • {sort_info}:*\n"
+
+    lines = [header]
+    for idx_in_page, opt in enumerate(current_slice):
+        num_icon = INDEX_EMOJIS[idx_in_page] if idx_in_page < len(INDEX_EMOJIS) else f"{idx_in_page + 1}."
+        flag = to_flag(opt.country_iso2)
+        c_name = opt.country_name
+        p_val = f"${opt.price} USD"
+        cnt_val = format_count_full(opt.count, lang)
+        cnt_part = f" • 📦 {cnt_val}" if cnt_val else ""
+        panel_tag = f" `[{opt.panel}]`" if is_admin else ""
+        prov_tag = f" ({opt.provider_name})" if opt.provider_name and opt.provider_name != "Any Provider" else ""
+        lines.append(f"{num_icon} {flag} *{md(c_name)}* — *{md(p_val)}*{md(cnt_part)}{md(prov_tag)}{panel_tag}")
+
+    if lang == "bn":
+        lines.append("\n👇 *নাম্বার কিনতে নিচের বাটনে ক্লিক করুন:*")
+    else:
+        lines.append("\n👇 *Tap a button below to purchase:*")
+
+    return "\n".join(lines)
 
 
 def price_keyboard(
@@ -2910,9 +2982,15 @@ def price_keyboard(
 ) -> InlineKeyboardMarkup:
     start, end = page * PAGE_SIZE, (page + 1) * PAGE_SIZE
     rows = []
-    for i in range(start, min(end, len(opts))):
-        label = opts[i].label_for(is_admin)
-        rows.append([InlineKeyboardButton(label, callback_data=f"by:{opts[i].service_code}:{i}")])
+    current_slice = opts[start:end]
+    for idx_in_page, opt in enumerate(current_slice):
+        global_idx = start + idx_in_page
+        num_icon = INDEX_EMOJIS[idx_in_page] if idx_in_page < len(INDEX_EMOJIS) else f"{idx_in_page + 1}."
+        flag = to_flag(opt.country_iso2)
+        cnt_short = f" • {format_count(opt.count, lang)}" if (opt.count is not None and opt.count > 0) else ""
+        tag = f" [{opt.panel}]" if is_admin else ""
+        label = f"{num_icon} {flag} ${opt.price}{cnt_short}{tag}"
+        rows.append([InlineKeyboardButton(label, callback_data=f"by:{opt.service_code}:{global_idx}")])
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton(tt(lang, "prev"), callback_data=f"pp:{opts[0].service_code}:{page - 1}:{sort_mode}"))
@@ -2947,7 +3025,9 @@ def country_picker_keyboard(
         flag = to_flag(c.get("iso2"))
         name = c.get("name")
         min_p = c.get("min_price")
-        price_tag = f" (${min_p})" if min_p else ""
+        cnt = c.get("total_count", 0)
+        cnt_tag = f" • {format_count(cnt, lang)}" if cnt > 0 else ""
+        price_tag = f" (${min_p}{cnt_tag})" if min_p else ""
         label = f"{flag} {name}{price_tag}"
         target_code = c.get("key") or c.get("code")
         rows.append([InlineKeyboardButton(label, callback_data=f"csel:{service_code}:{target_code}")])
@@ -2967,6 +3047,42 @@ def country_picker_keyboard(
     return InlineKeyboardMarkup(rows)
 
 
+def country_offers_text(
+    country_opts: List[Tuple[int, PriceOption]],
+    svc_name: str,
+    c_flag: str,
+    c_name: str,
+    page: int,
+    lang: str,
+    is_admin: bool = False,
+) -> str:
+    pages = (len(country_opts) - 1) // PAGE_SIZE + 1 if country_opts else 1
+    start, end = page * PAGE_SIZE, (page + 1) * PAGE_SIZE
+    current_slice = country_opts[start:end]
+
+    if lang == "bn":
+        header = f"📱 *{md(svc_name)}* • {c_flag} *{md(c_name)}*\n📄 *উপলব্ধ অফারসমূহ (পৃষ্ঠা {page + 1}/{pages}):*\n"
+    else:
+        header = f"📱 *{md(svc_name)}* • {c_flag} *{md(c_name)}*\n📄 *Available Offers (Page {page + 1}/{pages}):*\n"
+
+    lines = [header]
+    for idx_in_page, (_, opt) in enumerate(current_slice):
+        num_icon = INDEX_EMOJIS[idx_in_page] if idx_in_page < len(INDEX_EMOJIS) else f"{idx_in_page + 1}."
+        p_val = f"${opt.price} USD"
+        cnt_val = format_count_full(opt.count, lang)
+        cnt_part = f" • 📦 {cnt_val}" if cnt_val else ""
+        panel_tag = f" `[{opt.panel}]`" if is_admin else ""
+        prov_tag = f" ({opt.provider_name})" if opt.provider_name and opt.provider_name != "Any Provider" else ""
+        lines.append(f"{num_icon} *{md(p_val)}*{md(cnt_part)}{md(prov_tag)}{panel_tag}")
+
+    if lang == "bn":
+        lines.append("\n👇 *নাম্বার কিনতে নিচের বাটনে ক্লিক করুন:*")
+    else:
+        lines.append("\n👇 *Tap a button below to purchase:*")
+
+    return "\n".join(lines)
+
+
 def country_offers_keyboard(
     country_opts: List[Tuple[int, PriceOption]],
     service_code: str,
@@ -2977,9 +3093,13 @@ def country_offers_keyboard(
 ) -> InlineKeyboardMarkup:
     start, end = page * PAGE_SIZE, (page + 1) * PAGE_SIZE
     rows = []
-    for master_idx, opt in country_opts[start:end]:
-        label = opt.label_for(is_admin)
-        rows.append([InlineKeyboardButton(label, callback_data=f"by:{service_code}:{master_idx}")])
+    current_slice = country_opts[start:end]
+    for idx_in_page, (master_idx, opt) in enumerate(current_slice):
+        num_icon = INDEX_EMOJIS[idx_in_page] if idx_in_page < len(INDEX_EMOJIS) else f"{idx_in_page + 1}."
+        cnt_short = f" • {format_count(opt.count, lang)}" if (opt.count is not None and opt.count > 0) else ""
+        tag = f" [{opt.panel}]" if is_admin else ""
+        btn_label = f"{num_icon} ${opt.price}{cnt_short}{tag}"
+        rows.append([InlineKeyboardButton(btn_label, callback_data=f"by:{service_code}:{master_idx}")])
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton(tt(lang, "prev"), callback_data=f"pp_cy:{service_code}:{country_code}:{page - 1}"))
@@ -3098,6 +3218,7 @@ async def show_country_list(
     for o in opts:
         ckey = option_country_key(o)
         price_val = dec(o.price, "999999")
+        cnt = o.count or 0
         if ckey not in by_country:
             canonical_iso, canonical_name = canonical_country_info(o.country_iso2, o.country_name)
             by_country[ckey] = {
@@ -3106,10 +3227,12 @@ async def show_country_list(
                 "name": canonical_name,
                 "iso2": canonical_iso or o.country_iso2,
                 "min_price": price_val,
+                "total_count": cnt,
             }
         else:
             if price_val < by_country[ckey]["min_price"]:
                 by_country[ckey]["min_price"] = price_val
+            by_country[ckey]["total_count"] += cnt
 
     unique_countries = list(by_country.values())
     unique_countries.sort(key=lambda c: c["name"].lower())
@@ -3174,9 +3297,7 @@ async def show_prices(
     user_row = await adb(db.get, user_id) if user_id else None
     role = role_of(user_row)
     is_adm = (role == ROLE_ADMIN or user_id == ADMIN_USER_ID)
-    sort_info = "💵 By Price" if lang != "bn" else "💵 প্রাইস অনুযায়ী"
-
-    text = f"🌍 *{md(tt(lang, 'prices', service=name))}*\n{md(f'Page {page + 1}/{pages} • {sort_info}')}"
+    text = price_page_text(opts, name, page, lang, is_admin=is_adm, sort_mode=sort_mode)
     await safe_edit_message_markdown(
         query,
         text,
@@ -3822,10 +3943,7 @@ async def cb_price_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     pages = (len(opts) - 1) // PAGE_SIZE + 1
     role = role_of(row)
     is_adm = (role == ROLE_ADMIN or q.from_user.id == ADMIN_USER_ID)
-    sort_info = "💵 By Price" if sort_mode == "price" else "🌍 By Country"
-    if lang == "bn":
-        sort_info = "💵 প্রাইস অনুযায়ী" if sort_mode == "price" else "🌍 কান্ট্রি অনুযায়ী"
-    text = f"🌍 *{md(tt(lang, 'prices', service=opts[0].service_name))}*\n{md(f'Page {page + 1}/{pages} • {sort_info}')}"
+    text = price_page_text(opts, opts[0].service_name, page, lang, is_admin=is_adm, sort_mode=sort_mode)
     await safe_edit_message_markdown(
         q,
         text,
@@ -3919,23 +4037,10 @@ async def cb_country_select(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     c_flag = to_flag(canonical_iso or c_sample.country_iso2)
     c_name = canonical_name or c_sample.country_name
 
-    pages = (len(country_opts) - 1) // PAGE_SIZE + 1
-    if lang == "bn":
-        sub = f"উপলব্ধ নাম্বার নির্বাচন করুন (পৃষ্ঠা 1/{pages})"
-    elif lang == "hi":
-        sub = f"उपलब्ध नंबर चुनें (पृष्ठ 1/{pages})"
-    elif lang == "ar":
-        sub = f"اختر الرقم المتاح (صفحة 1/{pages})"
-    elif lang == "ru":
-        sub = f"Выберите доступный номер (стр. 1/{pages})"
-    else:
-        sub = f"Select available number (Page 1/{pages})"
-
-    title = f"📱 *{md(svc_name)}* • {c_flag} *{md(c_name)}*\n{md(sub)}"
-
+    text = country_offers_text(country_opts, svc_name, c_flag, c_name, 0, lang=lang, is_admin=is_adm)
     await safe_edit_message_markdown(
         q,
-        title,
+        text,
         reply_markup=country_offers_keyboard(country_opts, service_code, country_key, page=0, lang=lang, is_admin=is_adm),
     )
 
@@ -3975,17 +4080,10 @@ async def cb_country_offers_page(update: Update, context: ContextTypes.DEFAULT_T
     c_flag = to_flag(canonical_iso or c_sample.country_iso2)
     c_name = canonical_name or c_sample.country_name
 
-    pages = (len(country_opts) - 1) // PAGE_SIZE + 1
-    if lang == "bn":
-        page_str = f"পৃষ্ঠা {page + 1}/{pages}"
-    else:
-        page_str = f"Page {page + 1}/{pages}"
-
-    title = f"📱 *{md(svc_name)}* • {c_flag} *{md(c_name)}*\n{md(page_str)}"
-
+    text = country_offers_text(country_opts, svc_name, c_flag, c_name, page, lang=lang, is_admin=is_adm)
     await safe_edit_message_markdown(
         q,
-        title,
+        text,
         reply_markup=country_offers_keyboard(country_opts, service_code, country_key, page=page, lang=lang, is_admin=is_adm),
     )
 
