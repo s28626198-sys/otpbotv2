@@ -2945,32 +2945,37 @@ def price_page_text(
     sort_mode: str = "price",
 ) -> str:
     pages = (len(opts) - 1) // PAGE_SIZE + 1 if opts else 1
-    start, end = page * PAGE_SIZE, (page + 1) * PAGE_SIZE
-    current_slice = opts[start:end]
-    sort_info = "💵 প্রাইস অনুযায়ী" if lang == "bn" else "💵 By Lowest Price"
+    sort_info = "💵 সর্বনিম্ন প্রাইস অনুযায়ী" if lang == "bn" else "💵 By Lowest Price"
     if lang == "bn":
-        header = f"🌍 *{md(service_name)} এর উপলব্ধ নাম্বারসমূহ*\n📄 *পৃষ্ঠা {page + 1}/{pages} • {sort_info}:*\n"
+        return (
+            f"📱 *{md(service_name)}* \\- {md('উপলব্ধ নাম্বারসমূহ')}\n"
+            f"📄 {md(f'পৃষ্ঠা {page + 1}/{pages} • {sort_info}')}\n\n"
+            f"👇 *{md('নাম্বার কিনতে নিচের বাটনে ক্লিক করুন:')}*"
+        )
+    elif lang == "hi":
+        return (
+            f"📱 *{md(service_name)}* \\- {md('उपलब्ध नंबर')}\n"
+            f"📄 {md(f'पृष्ठ {page + 1}/{pages} • {sort_info}')}\n\n"
+            f"👇 *{md('नंबर खरीदने के लिए नीचे दिए गए बटन पर टैप करें:')}*"
+        )
+    elif lang == "ar":
+        return (
+            f"📱 *{md(service_name)}* \\- {md('الأرقام المتاحة')}\n"
+            f"📄 {md(f'صفحة {page + 1}/{pages} • {sort_info}')}\n\n"
+            f"👇 *{md('اضغط على أحد الأزرار أدناه للشراء:')}*"
+        )
+    elif lang == "ru":
+        return (
+            f"📱 *{md(service_name)}* \\- {md('Доступные номера')}\n"
+            f"📄 {md(f'Страница {page + 1}/{pages} • {sort_info}')}\n\n"
+            f"👇 *{md('Нажмите кнопку ниже для покупки:')}*"
+        )
     else:
-        header = f"🌍 *Available Numbers for {md(service_name)}*\n📄 *Page {page + 1}/{pages} • {sort_info}:*\n"
-
-    lines = [header]
-    for idx_in_page, opt in enumerate(current_slice):
-        num_icon = INDEX_EMOJIS[idx_in_page] if idx_in_page < len(INDEX_EMOJIS) else f"{idx_in_page + 1}."
-        flag = to_flag(opt.country_iso2)
-        c_name = opt.country_name
-        p_val = f"${opt.price} USD"
-        cnt_val = format_count_full(opt.count, lang)
-        cnt_part = f" • 📦 {cnt_val}" if cnt_val else ""
-        panel_tag = f" `[{opt.panel}]`" if is_admin else ""
-        prov_tag = f" ({opt.provider_name})" if opt.provider_name and opt.provider_name != "Any Provider" else ""
-        lines.append(f"{num_icon} {flag} *{md(c_name)}* — *{md(p_val)}*{md(cnt_part)}{md(prov_tag)}{panel_tag}")
-
-    if lang == "bn":
-        lines.append("\n👇 *নাম্বার কিনতে নিচের বাটনে ক্লিক করুন:*")
-    else:
-        lines.append("\n👇 *Tap a button below to purchase:*")
-
-    return "\n".join(lines)
+        return (
+            f"📱 *{md(service_name)}* \\- {md('Available Numbers')}\n"
+            f"📄 {md(f'Page {page + 1}/{pages} • {sort_info}')}\n\n"
+            f"👇 *{md('Tap a button below to purchase:')}*"
+        )
 
 
 def price_keyboard(
@@ -2985,11 +2990,11 @@ def price_keyboard(
     current_slice = opts[start:end]
     for idx_in_page, opt in enumerate(current_slice):
         global_idx = start + idx_in_page
-        num_icon = INDEX_EMOJIS[idx_in_page] if idx_in_page < len(INDEX_EMOJIS) else f"{idx_in_page + 1}."
         flag = to_flag(opt.country_iso2)
+        c_name = opt.country_name or ""
         cnt_short = f" • {format_count(opt.count, lang)}" if (opt.count is not None and opt.count > 0) else ""
         tag = f" [{opt.panel}]" if is_admin else ""
-        label = f"{num_icon} {flag} ${opt.price}{cnt_short}{tag}"
+        label = f"{flag} {c_name} • ${opt.price}{cnt_short}{tag}"
         rows.append([InlineKeyboardButton(label, callback_data=f"by:{opt.service_code}:{global_idx}")])
     nav = []
     if page > 0:
@@ -3109,30 +3114,36 @@ def country_offers_text(
     is_admin: bool = False,
 ) -> str:
     pages = (len(country_opts) - 1) // PAGE_SIZE + 1 if country_opts else 1
-    start, end = page * PAGE_SIZE, (page + 1) * PAGE_SIZE
-    current_slice = country_opts[start:end]
-
     if lang == "bn":
-        header = f"📱 *{md(svc_name)}* • {c_flag} *{md(c_name)}*\n📄 *উপলব্ধ অফারসমূহ (পৃষ্ঠা {page + 1}/{pages}):*\n"
+        return (
+            f"📱 *{md(svc_name)}* • {c_flag} *{md(c_name)}*\n"
+            f"📄 {md(f'উপলব্ধ অফারসমূহ (পৃষ্ঠা {page + 1}/{pages})')}\n\n"
+            f"👇 *{md('নাম্বার কিনতে নিচের বাটনে ক্লিক করুন:')}*"
+        )
+    elif lang == "hi":
+        return (
+            f"📱 *{md(svc_name)}* • {c_flag} *{md(c_name)}*\n"
+            f"📄 {md(f'उपलब्ध ऑफर (पृष्ठ {page + 1}/{pages})')}\n\n"
+            f"👇 *{md('नंबर खरीदने के लिए नीचे दिए गए बटन पर टैप करें:')}*"
+        )
+    elif lang == "ar":
+        return (
+            f"📱 *{md(svc_name)}* • {c_flag} *{md(c_name)}*\n"
+            f"📄 {md(f'العروض المتاحة (صفحة {page + 1}/{pages})')}\n\n"
+            f"👇 *{md('اضغط على أحد الأزرار أدناه للشراء:')}*"
+        )
+    elif lang == "ru":
+        return (
+            f"📱 *{md(svc_name)}* • {c_flag} *{md(c_name)}*\n"
+            f"📄 {md(f'Доступные предложения (Страница {page + 1}/{pages})')}\n\n"
+            f"👇 *{md('Нажмите кнопку ниже для покупки:')}*"
+        )
     else:
-        header = f"📱 *{md(svc_name)}* • {c_flag} *{md(c_name)}*\n📄 *Available Offers (Page {page + 1}/{pages}):*\n"
-
-    lines = [header]
-    for idx_in_page, (_, opt) in enumerate(current_slice):
-        num_icon = INDEX_EMOJIS[idx_in_page] if idx_in_page < len(INDEX_EMOJIS) else f"{idx_in_page + 1}."
-        p_val = f"${opt.price} USD"
-        cnt_val = format_count_full(opt.count, lang)
-        cnt_part = f" • 📦 {cnt_val}" if cnt_val else ""
-        panel_tag = f" `[{opt.panel}]`" if is_admin else ""
-        prov_tag = f" ({opt.provider_name})" if opt.provider_name and opt.provider_name != "Any Provider" else ""
-        lines.append(f"{num_icon} *{md(p_val)}*{md(cnt_part)}{md(prov_tag)}{panel_tag}")
-
-    if lang == "bn":
-        lines.append("\n👇 *নাম্বার কিনতে নিচের বাটনে ক্লিক করুন:*")
-    else:
-        lines.append("\n👇 *Tap a button below to purchase:*")
-
-    return "\n".join(lines)
+        return (
+            f"📱 *{md(svc_name)}* • {c_flag} *{md(c_name)}*\n"
+            f"📄 {md(f'Available Offers (Page {page + 1}/{pages})')}\n\n"
+            f"👇 *{md('Tap a button below to purchase:')}*"
+        )
 
 
 def country_offers_keyboard(
@@ -3148,10 +3159,10 @@ def country_offers_keyboard(
     rows = []
     current_slice = country_opts[start:end]
     for idx_in_page, (master_idx, opt) in enumerate(current_slice):
-        num_icon = INDEX_EMOJIS[idx_in_page] if idx_in_page < len(INDEX_EMOJIS) else f"{idx_in_page + 1}."
         cnt_short = f" • {format_count(opt.count, lang)}" if (opt.count is not None and opt.count > 0) else ""
+        prov_short = f" ({opt.provider_name})" if (opt.provider_name and opt.provider_name != "Any Provider") else ""
         tag = f" [{opt.panel}]" if is_admin else ""
-        btn_label = f"{num_icon} ${opt.price}{cnt_short}{tag}"
+        btn_label = f"${opt.price}{cnt_short}{prov_short}{tag}"
         rows.append([InlineKeyboardButton(btn_label, callback_data=f"by:{service_code}:{master_idx}")])
     nav = []
     let_param = letter or ""
