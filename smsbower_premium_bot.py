@@ -117,6 +117,8 @@ LANG_LABEL = {
 TR = {
     "en": {
         "m_popular": "⭐ Popular Services",
+        "m_profile": "👤 My Profile",
+        "m_history": "📜 History",
         "popular_services": "Popular Services",
         "m_select": "📋 Select Service",
         "m_search": "🔍 Search Service",
@@ -164,6 +166,8 @@ TR = {
     },
     "bn": {
         "m_popular": "⭐ পপুলার সার্ভিস",
+        "m_profile": "👤 প্রোফাইল",
+        "m_history": "📜 হিস্ট্রি",
         "popular_services": "পপুলার সার্ভিস",
         "m_select": "📋 সার্ভিস নির্বাচন",
         "m_search": "🔍 সার্ভিস খুঁজুন",
@@ -179,6 +183,8 @@ TR = {
     },
     "hi": {
         "m_popular": "⭐ लोकप्रिय सेवाएं",
+        "m_profile": "👤 मेरी प्रोफाइल",
+        "m_history": "📜 इतिहास",
         "popular_services": "लोकप्रिय सेवाएं",
         "m_select": "📋 सर्विस चुनें",
         "m_search": "🔍 सर्विस खोजें",
@@ -194,6 +200,8 @@ TR = {
     },
     "ar": {
         "m_popular": "⭐ الخدمات الشائعة",
+        "m_profile": "👤 ملفي الشخصي",
+        "m_history": "📜 السجل",
         "popular_services": "الخدمات الشائعة",
         "m_select": "📋 اختيار الخدمة",
         "m_search": "🔍 بحث خدمة",
@@ -209,6 +217,8 @@ TR = {
     },
     "ru": {
         "m_popular": "⭐ Популярные сервисы",
+        "m_profile": "👤 Мой профиль",
+        "m_history": "📜 История",
         "popular_services": "Популярные сервисы",
         "m_select": "📋 Выбрать сервис",
         "m_search": "🔍 Поиск сервиса",
@@ -270,8 +280,8 @@ TR["en"].update(
         "deposit_rejected_user": "🚫 Your deposit ${amount} has been rejected.",
         "deposit_reviewed": "✅ Deposit updated.",
         "deposit_not_found": "⚠️ Deposit not found or already reviewed.",
-        "refund_done": "✅ Auto refund added: ${amount}",
-        "otp_timeout_refund": "⏰ OTP not received in 25 minutes. Full refund: ${amount}",
+        "refund_done": "🧾 *Refund Receipt*\n─────────────────────\n🛑 Status: Cancelled\n💵 Refund Added: ${amount} USD\n💰 Balance updated successfully\n─────────────────────",
+        "otp_timeout_refund": "🧾 *Refund Receipt*\n─────────────────────\n⏰ Reason: OTP timeout (25 mins)\n💵 Full Refund Added: ${amount} USD\n💰 Balance updated successfully\n─────────────────────",
     }
 )
 
@@ -514,6 +524,10 @@ def detect_action(text: str) -> Optional[str]:
     for lg in LANGS:
         if cleaned == tt(lg, "m_popular"):
             return "popular"
+        if cleaned == tt(lg, "m_profile"):
+            return "profile"
+        if cleaned == tt(lg, "m_history"):
+            return "history"
         if cleaned == tt(lg, "m_select"):
             return "select"
         if cleaned == tt(lg, "m_search"):
@@ -533,13 +547,12 @@ def main_menu(lang: str, role: str = ROLE_USER) -> ReplyKeyboardMarkup:
     rows: List[List[str]] = [
         [tt(lang, "m_popular")],
         [tt(lang, "m_select"), tt(lang, "m_search")],
+        [tt(lang, "m_profile"), tt(lang, "m_history")],
     ]
     if role == ROLE_ADMIN:
-        rows.append([tt(lang, "m_balance")])
-        rows.append([tt(lang, "m_admin")])
+        rows.append([tt(lang, "m_balance"), tt(lang, "m_admin")])
     elif role in {ROLE_USER, ROLE_SUPER}:
-        rows.append([tt(lang, "m_wallet")])
-        rows.append([tt(lang, "m_deposit")])
+        rows.append([tt(lang, "m_wallet"), tt(lang, "m_deposit")])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True, is_persistent=True)
 
 
@@ -959,6 +972,23 @@ class DB:
             ).fetchone()
             c.close()
             return dict(row) if row else None
+
+    def list_user_activations(self, user_id: int, limit: int = 8) -> List[Dict[str, Any]]:
+        with self.lock:
+            c = self.conn()
+            rows = c.execute(
+                "SELECT * FROM activations WHERE user_id=? ORDER BY created_at DESC LIMIT ?",
+                (user_id, limit),
+            ).fetchall()
+            c.close()
+            return [dict(r) for r in rows]
+
+    def count_user_activations(self, user_id: int) -> int:
+        with self.lock:
+            c = self.conn()
+            row = c.execute("SELECT COUNT(1) as cnt FROM activations WHERE user_id=?", (user_id,)).fetchone()
+            c.close()
+            return int(row["cnt"]) if row else 0
 
 
 class SupabaseDB:
@@ -1844,6 +1874,27 @@ class SupabaseRESTDB:
     def latest_active_activation_for_user(self, user_id: int) -> Optional[Dict[str, Any]]:
         return self._one(self.sb.table("activations").select("*").eq("user_id", int(user_id)).eq("status", "active").order("created_at", desc=True).limit(1).execute())
 
+    def list_user_activations(self, user_id: int, limit: int = 8) -> List[Dict[str, Any]]:
+        with self.lock:
+            return self._rows(
+                self.sb.table("activations")
+                .select("*")
+                .eq("user_id", int(user_id))
+                .order("created_at", desc=True)
+                .limit(int(limit))
+                .execute()
+            )
+
+    def count_user_activations(self, user_id: int) -> int:
+        with self.lock:
+            rows = self._rows(
+                self.sb.table("activations")
+                .select("activation_id")
+                .eq("user_id", int(user_id))
+                .execute()
+            )
+            return len(rows)
+
     def refund_activation_if_needed(self, activation_id: str) -> Optional[Dict[str, Any]]:
         with self.lock:
             act = self.get_activation(activation_id)
@@ -2334,11 +2385,36 @@ async def cached_countries(context: ContextTypes.DEFAULT_TYPE) -> Dict[str, Dict
     return items
 
 
+def service_icon(code: str, name: str) -> str:
+    c = str(code).lower()
+    n = str(name).lower()
+    if c == "wa" or "whatsapp" in n:
+        return "🟢"
+    if c == "tg" or "telegram" in n:
+        return "🔷"
+    if c == "fb" or "facebook" in n:
+        return "🔵"
+    if c == "ig" or "instagram" in n or "insta" in n:
+        return "🟣"
+    if c == "twilio" or "tw" in c or "twilio" in n:
+        return "🔴"
+    if "google" in n or "gmail" in n:
+        return "🔴"
+    if "tiktok" in n:
+        return "🎵"
+    if "twitter" in n or " x " in f" {n} ":
+        return "🐦"
+    if "discord" in n:
+        return "👾"
+    return "📱"
+
+
 def svc_keyboard(items: List[Dict[str, str]], page: int, lang: str, mode: str) -> InlineKeyboardMarkup:
     start, end = page * PAGE_SIZE, (page + 1) * PAGE_SIZE
     rows = []
     for s in items[start:end]:
-        rows.append([InlineKeyboardButton(f"📱 {s['name']}", callback_data=f"sv:{s['code']}")])
+        icon = service_icon(s.get("code", ""), s.get("name", ""))
+        rows.append([InlineKeyboardButton(f"{icon} {s['name']}", callback_data=f"sv:{s['code']}")])
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton(tt(lang, "prev"), callback_data=f"sp:{mode}:{page - 1}"))
@@ -2674,6 +2750,158 @@ async def h_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
     await show_service_list(update, context, lang, items, 0, "all", tt(lang, "services"), role)
+
+
+async def h_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    db = context.application.bot_data["db"]
+    user_id, _, lang, role, _ = await ensure_user(update, db)
+    user_row = await adb(db.get, user_id) or {}
+    balance = money(await adb(db.get_balance, user_id)) if hasattr(db, "get_balance") else "0"
+    total_acts = await adb(db.count_user_activations, user_id) if hasattr(db, "count_user_activations") else 0
+
+    role_badges = {
+        ROLE_ADMIN: "👑 Admin VIP",
+        ROLE_SUPER: "⚡ Super VIP",
+        ROLE_USER: "👤 Verified User",
+        ROLE_PENDING: "⏳ Pending",
+        ROLE_BLOCKED: "🚫 Blocked",
+    }
+    tier = role_badges.get(role, role.capitalize())
+    raw_name = user_row.get("full_name") or user_row.get("username") or f"User {user_id}"
+
+    if lang == "bn":
+        card = (
+            f"╭────────────────────────╮\n"
+            f"│  🌟 TEMPLINE ভিআইপি ড্যাশবোর্ড  │\n"
+            f"├────────────────────────┤\n"
+            f"│ 👤 নাম: {raw_name}\n"
+            f"│ 🆔 ইউজার আইডি: {user_id}\n"
+            f"│ 🔰 মেম্বারশিপ: {tier}\n"
+            f"│ 💰 ওয়ালেট ব্যালেন্স: ${balance} USD\n"
+            f"│ 📱 মোট কেনা নাম্বার: {total_acts}টি\n"
+            f"╰────────────────────────╯"
+        )
+        dep_btn = "➕ ডিপোজিট করুন"
+        hist_btn = "📜 হিস্ট্রি দেখুন"
+        pop_btn = "⭐ পপুলার সার্ভিস"
+        ref_btn = "🔄 রিফ্রেশ"
+        supp_btn = "💬 এডমিন সাপোর্ট"
+    else:
+        card = (
+            f"╭────────────────────────╮\n"
+            f"│  🌟 TEMPLINE VIP ACCOUNT  │\n"
+            f"├────────────────────────┤\n"
+            f"│ 👤 Name: {raw_name}\n"
+            f"│ 🆔 User ID: {user_id}\n"
+            f"│ 🔰 Role: {tier}\n"
+            f"│ 💰 Wallet: ${balance} USD\n"
+            f"│ 📱 Total Purchased: {total_acts}\n"
+            f"╰────────────────────────╯"
+        )
+        dep_btn = "➕ Deposit"
+        hist_btn = "📜 View History"
+        pop_btn = "⭐ Popular Services"
+        ref_btn = "🔄 Refresh"
+        supp_btn = "💬 Admin Support"
+
+    kb_rows = [
+        [
+            InlineKeyboardButton(dep_btn, callback_data="btn_dep"),
+            InlineKeyboardButton(hist_btn, callback_data="btn_hist"),
+        ],
+        [
+            InlineKeyboardButton(pop_btn, callback_data="btn_pop"),
+            InlineKeyboardButton(ref_btn, callback_data="btn_prof_ref"),
+        ],
+    ]
+
+    admin_row = await adb(db.get, ADMIN_USER_ID) or {}
+    admin_un = str(admin_row.get("username") or "").strip().lstrip("@")
+    if admin_un:
+        kb_rows.append([InlineKeyboardButton(supp_btn, url=f"https://t.me/{admin_un}")])
+
+    await update.effective_message.reply_text(
+        md(card).replace(md(str(user_id)), cd(str(user_id))),
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=InlineKeyboardMarkup(kb_rows),
+    )
+
+
+async def h_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    db = context.application.bot_data["db"]
+    user_id, _, lang, role, _ = await ensure_user(update, db)
+    history = await adb(db.list_user_activations, user_id, 8) if hasattr(db, "list_user_activations") else []
+
+    if not history:
+        msg = "⚠️ আপনার এখনও কোনো নাম্বার কেনার হিস্ট্রি নেই।" if lang == "bn" else "⚠️ You haven't purchased any numbers yet."
+        await update.effective_message.reply_text(
+            md(msg),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=main_menu(lang, role),
+        )
+        return
+
+    header = "📜 *সাম্প্রতিক নাম্বার হিস্ট্রি (শেষ ৮টি):*\n─────────────────────" if lang == "bn" else "📜 *Recent Number History (Last 8):*\n─────────────────────"
+    lines = [header]
+    svc_map = context.application.bot_data.get("svc_cache", {}).get("map", {})
+
+    for h in history:
+        phone = str(h.get("phone") or "Unknown")
+        sc = str(h.get("service_code") or "")
+        sname = svc_map.get(sc) or sc.upper() or "Service"
+        icon = service_icon(sc, sname)
+        status = str(h.get("status") or "active").lower()
+        otp = h.get("otp_code")
+
+        if status == "otp_received" and otp:
+            st_text = f"✅ OTP: `{escape_markdown(str(otp), version=2, entity_type='code')}`"
+        elif status == "active":
+            st_text = "⏳ ওটিপির অপেক্ষায়" if lang == "bn" else "⏳ Waiting for OTP"
+        elif status == "cancelled":
+            st_text = "🛑 ক্যানসেল্ড (রিফান্ডেড)" if lang == "bn" else "🛑 Cancelled (Refunded)"
+        elif status == "expired":
+            st_text = "⏰ এক্সপায়ার্ড (রিফান্ডেড)" if lang == "bn" else "⏰ Expired (Refunded)"
+        else:
+            st_text = status.capitalize()
+
+        esc_phone = f"`{escape_markdown(phone, version=2, entity_type='code')}`"
+        lines.append(f"{icon} {esc_phone} • {md(sname)}\n   └ {st_text}")
+
+    footer = "─────────────────────\n💡 *নাম্বার বা ওটিপিতে ট্যাপ করলেই সরাসরি কপি হবে!*" if lang == "bn" else "─────────────────────\n💡 *Tap any number or OTP to copy instantly!*"
+    lines.append(footer)
+
+    kb = []
+    active_act = await adb(db.latest_active_activation_for_user, user_id)
+    if active_act:
+        aid = active_act.get("activation_id")
+        kb.append([InlineKeyboardButton("🛑 Cancel Active Number" if lang != "bn" else "🛑 একটিভ নাম্বার ক্যানসেল", callback_data=f"cx:{aid}")])
+    kb.append([InlineKeyboardButton("⭐ Popular Services" if lang != "bn" else "⭐ পপুলার সার্ভিস", callback_data="btn_pop")])
+
+    await update.effective_message.reply_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=InlineKeyboardMarkup(kb),
+    )
+
+
+async def cb_profile_actions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not q or not q.from_user:
+        return
+    await safe_answer_callback(q)
+    data = q.data or ""
+    if data == "btn_prof_ref":
+        await h_profile(update, context)
+        return
+    if data == "btn_dep":
+        await h_deposit_entry(update, context)
+        return
+    if data == "btn_hist":
+        await h_history(update, context)
+        return
+    if data == "btn_pop":
+        await h_popular(update, context)
+        return
 
 
 async def h_search_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -3231,6 +3459,12 @@ async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if action == "popular":
         await h_popular(update, context)
         return
+    if action == "profile":
+        await h_profile(update, context)
+        return
+    if action == "history":
+        await h_history(update, context)
+        return
     if action == "select":
         await h_select(update, context)
         return
@@ -3648,6 +3882,8 @@ async def post_init(app: Application) -> None:
         [
             BotCommand("start", "Start"),
             BotCommand("popular", "Popular services"),
+            BotCommand("profile", "My profile card"),
+            BotCommand("history", "Recent numbers history"),
             BotCommand("language", "Change language"),
             BotCommand("cancel", "Cancel activation"),
             BotCommand("admin", "Admin panel"),
@@ -3790,15 +4026,21 @@ def build_app() -> Application:
 
     app.add_handler(CommandHandler("start", h_start))
     app.add_handler(CommandHandler("popular", h_popular))
+    app.add_handler(CommandHandler("profile", h_profile))
+    app.add_handler(CommandHandler("history", h_history))
     app.add_handler(CommandHandler("language", h_lang))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("admin", h_admin_panel))
     app.add_handler(search_conv)
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(menu_regex("m_popular")), h_popular))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(menu_regex("m_profile")), h_profile))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(menu_regex("m_history")), h_history))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(menu_regex("m_select")), h_select))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(menu_regex("m_balance")), h_balance))
     app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, h_photo_state))
+
+    app.add_handler(CallbackQueryHandler(cb_profile_actions, pattern=r"^btn_"))
 
     app.add_handler(CallbackQueryHandler(cb_lang, pattern=r"^lg:"))
     app.add_handler(CallbackQueryHandler(cb_user_approval, pattern=r"^ua:"))
