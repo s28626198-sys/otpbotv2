@@ -2697,14 +2697,74 @@ def price_keyboard(
         rows.append(nav)
 
     if sort_mode == "price":
-        sort_btn_text = "🌍 কান্ট্রি অনুযায়ী সাজান" if lang == "bn" else "🌍 Sort by Country"
+        sort_btn_text = "🌍 কান্ট্রি অনুযায়ী দেখুন" if lang == "bn" else "🌍 View by Country"
         next_sort = "country"
     else:
-        sort_btn_text = "💵 প্রাইস অনুযায়ী সাজান" if lang == "bn" else "💵 Sort by Price"
+        sort_btn_text = "💵 প্রাইস অনুযায়ী দেখুন" if lang == "bn" else "💵 View by Price"
         next_sort = "price"
 
     rows.append([
         InlineKeyboardButton(sort_btn_text, callback_data=f"so:{next_sort}:{opts[0].service_code}"),
+        InlineKeyboardButton(tt(lang, "home"), callback_data="hm"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def country_picker_keyboard(
+    countries: List[Dict[str, Any]],
+    service_code: str,
+    page: int,
+    lang: str,
+) -> InlineKeyboardMarkup:
+    start, end = page * PAGE_SIZE, (page + 1) * PAGE_SIZE
+    rows = []
+    for c in countries[start:end]:
+        flag = to_flag(c.get("iso2"))
+        name = c.get("name")
+        min_p = c.get("min_price")
+        price_tag = f" (${min_p})" if min_p else ""
+        label = f"{flag} {name}{price_tag}"
+        rows.append([InlineKeyboardButton(label, callback_data=f"csel:{service_code}:{c['code']}")])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(tt(lang, "prev"), callback_data=f"cp_cy:{service_code}:{page - 1}"))
+    if end < len(countries):
+        nav.append(InlineKeyboardButton(tt(lang, "next"), callback_data=f"cp_cy:{service_code}:{page + 1}"))
+    if nav:
+        rows.append(nav)
+
+    sort_btn_text = "💵 সর্বনিম্ন প্রাইস অনুযায়ী দেখুন" if lang == "bn" else "💵 View by Lowest Price"
+    rows.append([
+        InlineKeyboardButton(sort_btn_text, callback_data=f"so:price:{service_code}"),
+        InlineKeyboardButton(tt(lang, "home"), callback_data="hm"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def country_offers_keyboard(
+    country_opts: List[Tuple[int, PriceOption]],
+    service_code: str,
+    country_code: str,
+    page: int,
+    lang: str,
+    is_admin: bool = False,
+) -> InlineKeyboardMarkup:
+    start, end = page * PAGE_SIZE, (page + 1) * PAGE_SIZE
+    rows = []
+    for master_idx, opt in country_opts[start:end]:
+        label = opt.label_for(is_admin)
+        rows.append([InlineKeyboardButton(label, callback_data=f"by:{service_code}:{master_idx}")])
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(tt(lang, "prev"), callback_data=f"pp_cy:{service_code}:{country_code}:{page - 1}"))
+    if end < len(country_opts):
+        nav.append(InlineKeyboardButton(tt(lang, "next"), callback_data=f"pp_cy:{service_code}:{country_code}:{page + 1}"))
+    if nav:
+        rows.append(nav)
+
+    back_text = "⬅️ কান্ট্রি লিস্টে ফিরুন" if lang == "bn" else "⬅️ Back to Countries"
+    rows.append([
+        InlineKeyboardButton(back_text, callback_data=f"so:country:{service_code}"),
         InlineKeyboardButton(tt(lang, "home"), callback_data="hm"),
     ])
     return InlineKeyboardMarkup(rows)
@@ -2734,14 +2794,12 @@ async def show_service_list(
     )
 
 
-async def show_prices(
+async def load_all_prices_for_service(
     query,
     context: ContextTypes.DEFAULT_TYPE,
     lang: str,
     service_code: str,
-    page: int = 0,
-    sort_mode: str = "price",
-) -> None:
+) -> List[PriceOption]:
     b = context.application.bot_data
     api: TemplineAPI = b["api"]
     smscode_api: Optional[SMSCodeAPI] = b.get("smscode_api")
@@ -2770,23 +2828,102 @@ async def show_prices(
     user_id = query.from_user.id if query and query.from_user else 0
     user_row = await adb(db.get, user_id) if user_id else None
     role = role_of(user_row)
-    is_adm = (role == ROLE_ADMIN or user_id == ADMIN_USER_ID)
     profit_pct = await adb(db.get_profit_percent) if hasattr(db, "get_profit_percent") else Decimal("20")
     opts = apply_role_prices(opts, role, profit_pct)
+    return opts
 
-    if sort_mode == "country":
-        opts.sort(key=lambda x: (x.country_name.lower(), float(x.price) if re.match(r"^\d+(\.\d+)?$", x.price) else 999999.0))
-    else:
-        opts.sort(key=lambda x: (float(x.price) if re.match(r"^\d+(\.\d+)?$", x.price) else 999999.0, x.country_name.lower()))
+
+async def show_country_list(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    lang: str,
+    service_code: str,
+    page: int = 0,
+    opts: Optional[List[PriceOption]] = None,
+) -> None:
+    if opts is None:
+        opts = context.user_data.get(f"price_{service_code}")
+    if not opts:
+        opts = await load_all_prices_for_service(query, context, lang, service_code)
+        context.user_data[f"price_{service_code}"] = opts
 
     if not opts:
         await query.edit_message_text(f"⚠️ {md(tt(lang, 'prices_empty'))}", parse_mode=ParseMode.MARKDOWN_V2)
         return
-    context.user_data[f"price_{service_code}"] = opts
-    pages = (len(opts) - 1) // PAGE_SIZE + 1
-    sort_info = "💵 By Price" if sort_mode == "price" else "🌍 By Country"
+
+    by_country: Dict[str, Dict[str, Any]] = {}
+    for o in opts:
+        cc = str(o.country_code)
+        if cc not in by_country:
+            by_country[cc] = {
+                "code": cc,
+                "name": o.country_name,
+                "iso2": o.country_iso2,
+                "min_price": dec(o.price, "999999"),
+            }
+        else:
+            p = dec(o.price, "999999")
+            if p < by_country[cc]["min_price"]:
+                by_country[cc]["min_price"] = p
+
+    unique_countries = list(by_country.values())
+    unique_countries.sort(key=lambda c: c["name"].lower())
+    for c in unique_countries:
+        c["min_price"] = money(c["min_price"])
+
+    pages = (len(unique_countries) - 1) // PAGE_SIZE + 1 if unique_countries else 1
+    svc_name = (
+        context.application.bot_data.get("svc_cache", {}).get("map", {}).get(service_code)
+        or service_code
+    )
+
     if lang == "bn":
-        sort_info = "💵 প্রাইস অনুযায়ী" if sort_mode == "price" else "🌍 কান্ট্রি অনুযায়ী"
+        title = f"🌍 *{md(svc_name)} - দেশ নির্বাচন করুন*\n{md(f'পৃষ্ঠা {page + 1}/{pages}')}"
+    elif lang == "hi":
+        title = f"🌍 *{md(svc_name)} - देश चुनें*\n{md(f'पृष्ठ {page + 1}/{pages}')}"
+    elif lang == "ar":
+        title = f"🌍 *{md(svc_name)} - اختر الدولة*\n{md(f'صفحة {page + 1}/{pages}')}"
+    elif lang == "ru":
+        title = f"🌍 *{md(svc_name)} - Выберите страну*\n{md(f'Страница {page + 1}/{pages}')}"
+    else:
+        title = f"🌍 *{md(svc_name)} - Select Country*\n{md(f'Page {page + 1}/{pages}')}"
+
+    await query.edit_message_text(
+        title,
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=country_picker_keyboard(unique_countries, service_code, page, lang),
+    )
+
+
+async def show_prices(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    lang: str,
+    service_code: str,
+    page: int = 0,
+    sort_mode: str = "price",
+) -> None:
+    b = context.application.bot_data
+    name = b.get("svc_cache", {}).get("map", {}).get(service_code, service_code)
+    opts = await load_all_prices_for_service(query, context, lang, service_code)
+    if not opts:
+        await query.edit_message_text(f"⚠️ {md(tt(lang, 'prices_empty'))}", parse_mode=ParseMode.MARKDOWN_V2)
+        return
+    context.user_data[f"price_{service_code}"] = opts
+
+    if sort_mode == "country":
+        await show_country_list(query, context, lang, service_code, page=page, opts=opts)
+        return
+
+    opts.sort(key=lambda x: (float(x.price) if re.match(r"^\d+(\.\d+)?$", x.price) else 999999.0, x.country_name.lower()))
+    pages = (len(opts) - 1) // PAGE_SIZE + 1 if opts else 1
+    user_id = query.from_user.id if query and query.from_user else 0
+    db = b["db"]
+    user_row = await adb(db.get, user_id) if user_id else None
+    role = role_of(user_row)
+    is_adm = (role == ROLE_ADMIN or user_id == ADMIN_USER_ID)
+    sort_info = "💵 By Price" if lang != "bn" else "💵 প্রাইস অনুযায়ী"
+
     text = f"🌍 *{md(tt(lang, 'prices', service=name))}*\n{md(f'Page {page + 1}/{pages} • {sort_info}')}"
     await query.edit_message_text(
         text,
@@ -3409,6 +3546,120 @@ async def cb_price_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         text,
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=price_keyboard(opts, page, lang, is_admin=is_adm, sort_mode=sort_mode),
+    )
+
+
+async def cb_country_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not q or not q.from_user:
+        return
+    await safe_answer_callback(q)
+    db = context.application.bot_data["db"]
+    row = await adb(db.get, q.from_user.id) or {}
+    lang = lang_from_code(row.get("lang"))
+    try:
+        _, service_code, p_str = q.data.split(":", 2)
+        page = max(0, int(p_str))
+    except Exception:
+        await safe_answer_callback(q, tt(lang, "expired"), show_alert=True)
+        return
+    await show_country_list(q, context, lang, service_code, page=page)
+
+
+async def cb_country_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not q or not q.from_user:
+        return
+    await safe_answer_callback(q)
+    db = context.application.bot_data["db"]
+    row = await adb(db.get, q.from_user.id) or {}
+    lang = lang_from_code(row.get("lang"))
+    role = role_of(row)
+    is_adm = (role == ROLE_ADMIN or q.from_user.id == ADMIN_USER_ID)
+
+    try:
+        _, service_code, country_code = q.data.split(":", 2)
+    except Exception:
+        await safe_answer_callback(q, tt(lang, "expired"), show_alert=True)
+        return
+
+    opts = context.user_data.get(f"price_{service_code}")
+    if not opts:
+        await q.edit_message_text(md(tt(lang, "load_prices")), parse_mode=ParseMode.MARKDOWN_V2)
+        opts = await load_all_prices_for_service(q, context, lang, service_code)
+        context.user_data[f"price_{service_code}"] = opts
+
+    country_opts = [(i, o) for i, o in enumerate(opts) if str(o.country_code) == str(country_code)]
+    if not country_opts:
+        await safe_answer_callback(q, "No numbers available for this country", show_alert=True)
+        return
+
+    country_opts.sort(key=lambda item: float(item[1].price) if re.match(r"^\d+(\.\d+)?$", item[1].price) else 999999.0)
+
+    c_sample = country_opts[0][1]
+    svc_name = c_sample.service_name
+    c_flag = to_flag(c_sample.country_iso2)
+    c_name = c_sample.country_name
+
+    pages = (len(country_opts) - 1) // PAGE_SIZE + 1
+    if lang == "bn":
+        title = f"📱 *{md(svc_name)} • {c_flag} {md(c_name)}*\n{md(f'উপলব্ধ নাম্বার নির্বাচন করুন (পৃষ্ঠা 1/{pages}):')}"
+    elif lang == "hi":
+        title = f"📱 *{md(svc_name)} • {c_flag} {md(c_name)}*\n{md(f'उपलब्ध नंबर चुनें (पृष्ठ 1/{pages}):')}"
+    elif lang == "ar":
+        title = f"📱 *{md(svc_name)} • {c_flag} {md(c_name)}*\n{md(f'اختر الرقم المتاح (صفحة 1/{pages}):')}"
+    elif lang == "ru":
+        title = f"📱 *{md(svc_name)} • {c_flag} {md(c_name)}*\n{md(f'Выберите доступный номер (стр. 1/{pages}):')}"
+    else:
+        title = f"📱 *{md(svc_name)} • {c_flag} {md(c_name)}*\n{md(f'Select available number (Page 1/{pages}):')}"
+
+    await q.edit_message_text(
+        title,
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=country_offers_keyboard(country_opts, service_code, country_code, page=0, lang=lang, is_admin=is_adm),
+    )
+
+
+async def cb_country_offers_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not q or not q.from_user:
+        return
+    await safe_answer_callback(q)
+    db = context.application.bot_data["db"]
+    row = await adb(db.get, q.from_user.id) or {}
+    lang = lang_from_code(row.get("lang"))
+    role = role_of(row)
+    is_adm = (role == ROLE_ADMIN or q.from_user.id == ADMIN_USER_ID)
+
+    try:
+        _, service_code, country_code, p_str = q.data.split(":", 3)
+        page = max(0, int(p_str))
+    except Exception:
+        await safe_answer_callback(q, tt(lang, "expired"), show_alert=True)
+        return
+
+    opts = context.user_data.get(f"price_{service_code}") or []
+    country_opts = [(i, o) for i, o in enumerate(opts) if str(o.country_code) == str(country_code)]
+    if not country_opts:
+        await safe_answer_callback(q, tt(lang, "expired"), show_alert=True)
+        return
+
+    country_opts.sort(key=lambda item: float(item[1].price) if re.match(r"^\d+(\.\d+)?$", item[1].price) else 999999.0)
+    c_sample = country_opts[0][1]
+    svc_name = c_sample.service_name
+    c_flag = to_flag(c_sample.country_iso2)
+    c_name = c_sample.country_name
+
+    pages = (len(country_opts) - 1) // PAGE_SIZE + 1
+    if lang == "bn":
+        title = f"📱 *{md(svc_name)} • {c_flag} {md(c_name)}*\n{md(f'পৃষ্ঠা {page + 1}/{pages}')}"
+    else:
+        title = f"📱 *{md(svc_name)} • {c_flag} {md(c_name)}*\n{md(f'Page {page + 1}/{pages}')}"
+
+    await q.edit_message_text(
+        title,
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=country_offers_keyboard(country_opts, service_code, country_code, page=page, lang=lang, is_admin=is_adm),
     )
 
 
@@ -4561,6 +4812,9 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(cb_service_page, pattern=r"^sp:"))
     app.add_handler(CallbackQueryHandler(cb_service_select, pattern=r"^sv:"))
     app.add_handler(CallbackQueryHandler(cb_sort_choice, pattern=r"^so:"))
+    app.add_handler(CallbackQueryHandler(cb_country_page, pattern=r"^cp_cy:"))
+    app.add_handler(CallbackQueryHandler(cb_country_select, pattern=r"^csel:"))
+    app.add_handler(CallbackQueryHandler(cb_country_offers_page, pattern=r"^pp_cy:"))
     app.add_handler(CallbackQueryHandler(cb_price_page, pattern=r"^pp:"))
     app.add_handler(CallbackQueryHandler(cb_buy, pattern=r"^by:"))
     app.add_handler(CallbackQueryHandler(cb_another, pattern=r"^an:"))
