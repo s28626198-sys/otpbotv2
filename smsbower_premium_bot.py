@@ -131,8 +131,8 @@ TR = {
         "prices_empty": "⚠️ No prices available for this service.",
         "load_prices": "🌍 Loading prices...",
         "active_exists": "⚠️ You already have an active activation. Cancel it first.",
-        "number": "✅ Number Ready\n📱 Number: {phone}\n🆔 Activation: {aid}\n🌍 Country: {country}\n🏷️ Provider: {provider}\n🔥 Waiting for OTP...",
-        "otp": "🔥 OTP Received\n📨 OTP: {otp}",
+        "number": "✅ Number Ready\n📱 Number: {phone}\n📋 Service: {service}\n💰 Price: ${price} USD\n🆔 Activation: {aid}\n🌍 Country: {country}\n🏷️ Provider: {provider}\n🔥 Waiting for OTP...",
+        "otp": "🔥 OTP Received\n📱 Number: {phone}\n📋 Service: {service}\n📨 OTP: {otp}",
         "copy_num": "📋 Copy Number",
         "copy_otp": "📋 Copy OTP",
         "cancel": "🛑 Cancel Activation",
@@ -2407,16 +2407,29 @@ async def start_poll_task(app: Application, aid: str) -> None:
                 continue
             if st == "OK" and val:
                 otp = str(val)
+                phone = str(act.get("phone") or user_row.get("phone") or "Unknown")
+                service_code = str(act.get("service_code") or user_row.get("service_code") or "")
+                service_name = (
+                    app.bot_data.get("svc_cache", {}).get("map", {}).get(service_code)
+                    or service_code
+                )
                 kb = InlineKeyboardMarkup(
                     [
                         [copy_button(tt(lang, "copy_otp"), otp, f"cp:otp:{user_id}")],
                         [InlineKeyboardButton(tt(lang, "home"), callback_data="hm")],
                     ]
                 )
-                msg = tt(lang, "otp", otp=otp)
+                msg = tt(
+                    lang,
+                    "otp",
+                    otp="TOKENOTPVAL",
+                    phone="TOKENPHONEVAL",
+                    service=service_name,
+                )
+                md_msg = md(msg).replace("TOKENOTPVAL", cd(otp)).replace("TOKENPHONEVAL", cd(phone))
                 await app.bot.send_message(
                     chat_id,
-                    md(msg).replace(md(otp), cd(otp)),
+                    md_msg,
                     parse_mode=ParseMode.MARKDOWN_V2,
                     reply_markup=kb,
                 )
@@ -2782,9 +2795,23 @@ async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         or country_name_to_iso2(resolved_name)
     )
     country_display = f"{to_flag(resolved_iso2)} {resolved_name} ({opt.country_code})"
+    service_name = (
+        opt.service_name
+        or context.application.bot_data.get("svc_cache", {}).get("map", {}).get(opt.service_code)
+        or opt.service_code
+    )
+    price_val = money(opt.price) if opt.price else "0"
 
-    text = tt(lang, "number", phone=phone, aid=aid, country=country_display, provider=provider)
-    text = text.replace(phone, f"{phone}").replace(aid, f"{aid}")
+    text = tt(
+        lang,
+        "number",
+        phone="TOKENPHONEVAL",
+        aid="TOKENAIDVAL",
+        country=country_display,
+        provider=provider,
+        service=service_name,
+        price=price_val,
+    )
     provider_token = opt.provider_id if opt.provider_id else "none"
     another_cb = f"an:{opt.service_code}:{opt.country_code}:{provider_token}"
     kb = InlineKeyboardMarkup(
@@ -2795,7 +2822,7 @@ async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         ]
     )
     await q.message.reply_text(
-        md(text).replace(md(phone), cd(phone)).replace(md(aid), cd(aid)),
+        md(text).replace("TOKENPHONEVAL", cd(phone)).replace("TOKENAIDVAL", cd(aid)),
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=kb,
     )
@@ -2884,8 +2911,23 @@ async def cb_another(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     resolved_iso2 = cinfo.get("iso2") or country_name_to_iso2(resolved_name)
     country_display = f"{to_flag(resolved_iso2)} {resolved_name} ({country_code})"
     provider = f"Provider {provider_id}" if provider_id else tt(lang, "fallback_provider")
+    service_name = (
+        (opt.service_name if opt else None)
+        or context.application.bot_data.get("svc_cache", {}).get("map", {}).get(service_code)
+        or service_code
+    )
+    price_val = money(opt.price) if (opt and opt.price) else (money(charge) if charge > 0 else "0")
 
-    text = tt(lang, "number", phone=phone, aid=aid, country=country_display, provider=provider)
+    text = tt(
+        lang,
+        "number",
+        phone="TOKENPHONEVAL",
+        aid="TOKENAIDVAL",
+        country=country_display,
+        provider=provider,
+        service=service_name,
+        price=price_val,
+    )
     provider_token_new = provider_id if provider_id else "none"
     another_cb = f"an:{service_code}:{country_code}:{provider_token_new}"
     kb = InlineKeyboardMarkup(
@@ -2895,7 +2937,11 @@ async def cb_another(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             [InlineKeyboardButton(tt(lang, "cancel"), callback_data=f"cx:{aid}")],
         ]
     )
-    await q.message.reply_text(md(text).replace(md(phone), cd(phone)).replace(md(aid), cd(aid)), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=kb)
+    await q.message.reply_text(
+        md(text).replace("TOKENPHONEVAL", cd(phone)).replace("TOKENAIDVAL", cd(aid)),
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=kb,
+    )
     await start_poll_task(context.application, aid)
 
 
