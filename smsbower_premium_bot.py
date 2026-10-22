@@ -12,7 +12,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from urllib.parse import urlparse
 
@@ -3013,14 +3013,62 @@ def price_keyboard(
     return InlineKeyboardMarkup(rows)
 
 
+def country_first_letter(name: Optional[str]) -> str:
+    cleaned = (name or "").strip()
+    for ch in cleaned:
+        if ch.isalpha():
+            return ch.upper()
+    return "#"
+
+
+def country_letter_picker_keyboard(
+    service_code: str,
+    avail_letters: Set[str],
+    lang: str,
+) -> InlineKeyboardMarkup:
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    rows = []
+    # 5 letters per row for A-Y
+    for i in range(0, 25, 5):
+        chunk = alphabet[i : i + 5]
+        row = []
+        for let in chunk:
+            if let in avail_letters:
+                row.append(InlineKeyboardButton(let, callback_data=f"c_let:{service_code}:{let}"))
+            else:
+                row.append(InlineKeyboardButton(let, callback_data=f"c_none:{let}"))
+        rows.append(row)
+
+    # Row 6: Z + All Countries
+    row_z = []
+    if "Z" in avail_letters:
+        row_z.append(InlineKeyboardButton("Z", callback_data=f"c_let:{service_code}:Z"))
+    else:
+        row_z.append(InlineKeyboardButton("Z", callback_data="c_none:Z"))
+
+    all_label = "🌐 All (সকল দেশ)" if lang == "bn" else "🌐 All Countries"
+    row_z.append(InlineKeyboardButton(all_label, callback_data=f"c_let:{service_code}:ALL"))
+    rows.append(row_z)
+
+    # Bottom action buttons:
+    sort_btn_text = "💵 সর্বনিম্ন প্রাইস অনুযায়ী দেখুন" if lang == "bn" else "💵 View by Lowest Price"
+    rows.append([
+        InlineKeyboardButton(sort_btn_text, callback_data=f"so:price:{service_code}"),
+        InlineKeyboardButton(tt(lang, "home"), callback_data="hm"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
 def country_picker_keyboard(
     countries: List[Dict[str, Any]],
     service_code: str,
     page: int,
     lang: str,
+    letter: Optional[str] = None,
 ) -> InlineKeyboardMarkup:
     start, end = page * PAGE_SIZE, (page + 1) * PAGE_SIZE
     rows = []
+    let_param = letter if letter else "ALL"
     for c in countries[start:end]:
         flag = to_flag(c.get("iso2"))
         name = c.get("name")
@@ -3030,18 +3078,22 @@ def country_picker_keyboard(
         price_tag = f" (${min_p}{cnt_tag})" if min_p else ""
         label = f"{flag} {name}{price_tag}"
         target_code = c.get("key") or c.get("code")
-        rows.append([InlineKeyboardButton(label, callback_data=f"csel:{service_code}:{target_code}")])
+        rows.append([InlineKeyboardButton(label, callback_data=f"csel:{service_code}:{target_code}:{let_param}")])
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton(tt(lang, "prev"), callback_data=f"cp_cy:{service_code}:{page - 1}"))
+        nav.append(InlineKeyboardButton(tt(lang, "prev"), callback_data=f"c_let:{service_code}:{let_param}:{page - 1}"))
     if end < len(countries):
-        nav.append(InlineKeyboardButton(tt(lang, "next"), callback_data=f"cp_cy:{service_code}:{page + 1}"))
+        nav.append(InlineKeyboardButton(tt(lang, "next"), callback_data=f"c_let:{service_code}:{let_param}:{page + 1}"))
     if nav:
         rows.append(nav)
 
+    back_let_text = "⬅️ লেটার পরিবর্তন (A-Z)" if lang == "bn" else "⬅️ Change Letter (A-Z)"
     sort_btn_text = "💵 সর্বনিম্ন প্রাইস অনুযায়ী দেখুন" if lang == "bn" else "💵 View by Lowest Price"
     rows.append([
+        InlineKeyboardButton(back_let_text, callback_data=f"so:country:{service_code}"),
         InlineKeyboardButton(sort_btn_text, callback_data=f"so:price:{service_code}"),
+    ])
+    rows.append([
         InlineKeyboardButton(tt(lang, "home"), callback_data="hm"),
     ])
     return InlineKeyboardMarkup(rows)
@@ -3090,6 +3142,7 @@ def country_offers_keyboard(
     page: int,
     lang: str,
     is_admin: bool = False,
+    letter: Optional[str] = None,
 ) -> InlineKeyboardMarkup:
     start, end = page * PAGE_SIZE, (page + 1) * PAGE_SIZE
     rows = []
@@ -3101,16 +3154,18 @@ def country_offers_keyboard(
         btn_label = f"{num_icon} ${opt.price}{cnt_short}{tag}"
         rows.append([InlineKeyboardButton(btn_label, callback_data=f"by:{service_code}:{master_idx}")])
     nav = []
+    let_param = letter or ""
     if page > 0:
-        nav.append(InlineKeyboardButton(tt(lang, "prev"), callback_data=f"pp_cy:{service_code}:{country_code}:{page - 1}"))
+        nav.append(InlineKeyboardButton(tt(lang, "prev"), callback_data=f"pp_cy:{service_code}:{country_code}:{page - 1}:{let_param}"))
     if end < len(country_opts):
-        nav.append(InlineKeyboardButton(tt(lang, "next"), callback_data=f"pp_cy:{service_code}:{country_code}:{page + 1}"))
+        nav.append(InlineKeyboardButton(tt(lang, "next"), callback_data=f"pp_cy:{service_code}:{country_code}:{page + 1}:{let_param}"))
     if nav:
         rows.append(nav)
 
     back_text = "⬅️ কান্ট্রি লিস্টে ফিরুন" if lang == "bn" else "⬅️ Back to Countries"
+    back_cb = f"c_let:{service_code}:{letter}" if (letter and letter != "ALL") else (f"c_let:{service_code}:ALL" if letter == "ALL" else f"so:country:{service_code}")
     rows.append([
-        InlineKeyboardButton(back_text, callback_data=f"so:country:{service_code}"),
+        InlineKeyboardButton(back_text, callback_data=back_cb),
         InlineKeyboardButton(tt(lang, "home"), callback_data="hm"),
     ])
     return InlineKeyboardMarkup(rows)
@@ -3189,12 +3244,11 @@ async def load_all_prices_for_service(
     return opts
 
 
-async def show_country_list(
+async def show_country_letter_picker(
     query,
     context: ContextTypes.DEFAULT_TYPE,
     lang: str,
     service_code: str,
-    page: int = 0,
     opts: Optional[List[PriceOption]] = None,
 ) -> None:
     db = context.application.bot_data["db"]
@@ -3211,7 +3265,94 @@ async def show_country_list(
         opts = [o for o in opts if (o.panel == "SMSBower" and bower_on) or (o.panel == "SMSCode" and smscode_on)]
 
     if not opts:
-        await query.edit_message_text(f"⚠️ {md(tt(lang, 'prices_empty'))}", parse_mode=ParseMode.MARKDOWN_V2)
+        await safe_edit_message_markdown(query, f"⚠️ {md(tt(lang, 'prices_empty'))}")
+        return
+
+    by_country: Dict[str, Dict[str, Any]] = {}
+    for o in opts:
+        ckey = option_country_key(o)
+        if ckey not in by_country:
+            canonical_iso, canonical_name = canonical_country_info(o.country_iso2, o.country_name)
+            by_country[ckey] = {
+                "key": ckey,
+                "name": canonical_name,
+            }
+
+    unique_countries = list(by_country.values())
+    if not unique_countries:
+        await safe_edit_message_markdown(query, f"⚠️ {md(tt(lang, 'prices_empty'))}")
+        return
+
+    avail_letters: Set[str] = set()
+    for c in unique_countries:
+        fl = country_first_letter(c.get("name"))
+        if fl and fl.isalpha():
+            avail_letters.add(fl.upper())
+
+    svc_name = (
+        context.application.bot_data.get("svc_cache", {}).get("map", {}).get(service_code)
+        or service_code
+    )
+
+    if lang == "bn":
+        s_head = md("দেশ খুঁজুন")
+        s_instr = md("যে লেটার দিয়ে দেশের নাম শুরু, সেই লেটার সিলেক্ট করুন:")
+        s_ex = md("(যেমন: B = Bangladesh, I = India, U = USA)")
+        s_cnt = md(f"মোট উপলব্ধ দেশ: {len(unique_countries)} টি")
+        title = f"🌍 *{md(svc_name)}* \\- {s_head}\n\n{s_instr}\n_{s_ex}_\n\n📦 {s_cnt}"
+    elif lang == "hi":
+        s_head = md("देश चुनें")
+        s_instr = md("जिस अक्षर से देश का नाम शुरू होता है, उसे चुनें:")
+        s_ex = md("(उदा: B = Bangladesh, I = India, U = USA)")
+        s_cnt = md(f"कुल उपलब्ध देश: {len(unique_countries)}")
+        title = f"🌍 *{md(svc_name)}* \\- {s_head}\n\n{s_instr}\n_{s_ex}_\n\n📦 {s_cnt}"
+    elif lang == "ar":
+        s_head = md("اختر الدولة")
+        s_instr = md("اختر الحرف الأول من اسم الدولة:")
+        s_ex = md("(مثال: B = Bangladesh, I = India, U = USA)")
+        s_cnt = md(f"إجمالي الدول المتاحة: {len(unique_countries)}")
+        title = f"🌍 *{md(svc_name)}* \\- {s_head}\n\n{s_instr}\n_{s_ex}_\n\n📦 {s_cnt}"
+    elif lang == "ru":
+        s_head = md("Выберите страну")
+        s_instr = md("Выберите первую букву названия страны:")
+        s_ex = md("(напр.: B = Bangladesh, I = India, U = USA)")
+        s_cnt = md(f"Всего доступных стран: {len(unique_countries)}")
+        title = f"🌍 *{md(svc_name)}* \\- {s_head}\n\n{s_instr}\n_{s_ex}_\n\n📦 {s_cnt}"
+    else:
+        s_head = md("Choose Country Letter")
+        s_instr = md("Select the first letter of the country name:")
+        s_ex = md("(e.g., B = Bangladesh, I = India, U = USA)")
+        s_cnt = md(f"Total available countries: {len(unique_countries)}")
+        title = f"🌍 *{md(svc_name)}* \\- {s_head}\n\n{s_instr}\n_{s_ex}_\n\n📦 {s_cnt}"
+
+    reply_markup = country_letter_picker_keyboard(service_code, avail_letters, lang)
+    await safe_edit_message_markdown(query, title, reply_markup=reply_markup)
+
+
+async def show_country_list(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    lang: str,
+    service_code: str,
+    page: int = 0,
+    opts: Optional[List[PriceOption]] = None,
+    letter: Optional[str] = None,
+) -> None:
+    db = context.application.bot_data["db"]
+    panels = await adb(db.get_panel_status) if hasattr(db, "get_panel_status") else {"smsbower": True, "smscode": True}
+    bower_on = bool(panels.get("smsbower", True))
+    smscode_on = bool(panels.get("smscode", True))
+
+    if opts is None:
+        opts = context.user_data.get(f"price_{service_code}")
+    if not opts:
+        opts = await load_all_prices_for_service(query, context, lang, service_code)
+        context.user_data[f"price_{service_code}"] = opts
+    elif opts:
+        opts = [o for o in opts if (o.panel == "SMSBower" and bower_on) or (o.panel == "SMSCode" and smscode_on)]
+
+    if not opts:
+        await safe_edit_message_markdown(query, f"⚠️ {md(tt(lang, 'prices_empty'))}")
         return
 
     by_country: Dict[str, Dict[str, Any]] = {}
@@ -3239,26 +3380,47 @@ async def show_country_list(
     for c in unique_countries:
         c["min_price"] = money(c["min_price"])
 
-    pages = (len(unique_countries) - 1) // PAGE_SIZE + 1 if unique_countries else 1
+    target_letter = letter.upper() if (letter and letter.upper() != "ALL") else None
+    if target_letter:
+        filtered_countries = [c for c in unique_countries if country_first_letter(c.get("name")) == target_letter]
+    else:
+        filtered_countries = unique_countries
+
+    if not filtered_countries:
+        if lang == "bn":
+            empty_msg = f"⚠️ '{target_letter}' দিয়ে কোনো দেশের নাম্বার এই মুহূর্তে পাওয়া যায়নি।"
+            btn_back = "⬅️ লেটার পরিবর্তন (A-Z)"
+        else:
+            empty_msg = f"⚠️ No countries available starting with '{target_letter}'."
+            btn_back = "⬅️ Change Letter (A-Z)"
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(btn_back, callback_data=f"so:country:{service_code}")],
+            [InlineKeyboardButton(tt(lang, "home"), callback_data="hm")],
+        ])
+        await safe_edit_message_markdown(query, md(empty_msg), reply_markup=kb)
+        return
+
+    pages = (len(filtered_countries) - 1) // PAGE_SIZE + 1 if filtered_countries else 1
     svc_name = (
         context.application.bot_data.get("svc_cache", {}).get("map", {}).get(service_code)
         or service_code
     )
 
+    letter_tag = f" (Letter: {target_letter})" if target_letter else ""
     if lang == "bn":
-        sub = "দেশ নির্বাচন করুন"
+        sub = f"দেশ নির্বাচন করুন{letter_tag}"
         page_str = f"পৃষ্ঠা {page + 1}/{pages}"
     elif lang == "hi":
-        sub = "देश चुनें"
+        sub = f"देश चुनें{letter_tag}"
         page_str = f"पृष्ठ {page + 1}/{pages}"
     elif lang == "ar":
-        sub = "اختر الدولة"
+        sub = f"اختر الدولة{letter_tag}"
         page_str = f"صفحة {page + 1}/{pages}"
     elif lang == "ru":
-        sub = "Выберите страну"
+        sub = f"Выберите страну{letter_tag}"
         page_str = f"Страница {page + 1}/{pages}"
     else:
-        sub = "Select Country"
+        sub = f"Select Country{letter_tag}"
         page_str = f"Page {page + 1}/{pages}"
 
     title = f"🌍 *{md(svc_name)}* \\- {md(sub)}\n{md(page_str)}"
@@ -3266,7 +3428,7 @@ async def show_country_list(
     await safe_edit_message_markdown(
         query,
         title,
-        reply_markup=country_picker_keyboard(unique_countries, service_code, page, lang),
+        reply_markup=country_picker_keyboard(filtered_countries, service_code, page, lang, letter=target_letter or "ALL"),
     )
 
 
@@ -3287,7 +3449,7 @@ async def show_prices(
     context.user_data[f"price_{service_code}"] = opts
 
     if sort_mode == "country":
-        await show_country_list(query, context, lang, service_code, page=page, opts=opts)
+        await show_country_letter_picker(query, context, lang, service_code, opts=opts)
         return
 
     opts.sort(key=lambda x: (float(x.price) if re.match(r"^\d+(\.\d+)?$", x.price) else 999999.0, x.country_name.lower()))
@@ -3906,7 +4068,10 @@ async def cb_sort_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     await safe_edit_message_markdown(q, md(tt(lang, "load_prices")))
     try:
-        await show_prices(q, context, lang, service_code, 0, sort_mode=sort_mode)
+        if sort_mode == "country":
+            await show_country_letter_picker(q, context, lang, service_code)
+        else:
+            await show_prices(q, context, lang, service_code, 0, sort_mode=sort_mode)
     except Exception as e:
         logger.warning("show_prices failed: %s", e)
         await safe_reply_markdown(
@@ -3914,6 +4079,47 @@ async def cb_sort_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             md(tt(lang, "generic_fail")),
             reply_markup=main_menu(lang, role_of(row)),
         )
+
+
+async def cb_country_letter(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not q or not q.from_user:
+        return
+    await safe_answer_callback(q)
+    db = context.application.bot_data["db"]
+    row = await adb(db.get, q.from_user.id) or {}
+    lang = lang_from_code(row.get("lang"))
+    try:
+        parts = q.data.split(":")
+        service_code = parts[1]
+        letter = parts[2].upper()
+        page = max(0, int(parts[3])) if len(parts) > 3 else 0
+    except Exception:
+        await safe_answer_callback(q, tt(lang, "expired"), show_alert=True)
+        return
+    await show_country_list(q, context, lang, service_code, page=page, letter=letter)
+
+
+async def cb_country_none(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not q or not q.from_user:
+        return
+    parts = (q.data or "").split(":")
+    letter = parts[1] if len(parts) > 1 else ""
+    db = context.application.bot_data["db"]
+    row = await adb(db.get, q.from_user.id) or {}
+    lang = lang_from_code(row.get("lang"))
+    if lang == "bn":
+        msg = f"⚠️ '{letter}' দিয়ে কোনো দেশের নাম্বার এই মুহূর্তে উপলব্ধ নেই।"
+    elif lang == "hi":
+        msg = f"⚠️ '{letter}' से कोई देश इस समय उपलब्ध नहीं है।"
+    elif lang == "ar":
+        msg = f"⚠️ لا توجد أرقام لدول تبدأ بحرف '{letter}' حالياً."
+    elif lang == "ru":
+        msg = f"⚠️ Номера для стран на букву '{letter}' сейчас недоступны."
+    else:
+        msg = f"⚠️ No country numbers available starting with '{letter}'."
+    await safe_answer_callback(q, msg, show_alert=True)
 
 
 async def cb_price_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3960,12 +4166,14 @@ async def cb_country_page(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     row = await adb(db.get, q.from_user.id) or {}
     lang = lang_from_code(row.get("lang"))
     try:
-        _, service_code, p_str = q.data.split(":", 2)
-        page = max(0, int(p_str))
+        parts = q.data.split(":")
+        service_code = parts[1]
+        page = max(0, int(parts[2]))
+        letter = parts[3] if len(parts) > 3 and parts[3] else None
     except Exception:
         await safe_answer_callback(q, tt(lang, "expired"), show_alert=True)
         return
-    await show_country_list(q, context, lang, service_code, page=page)
+    await show_country_list(q, context, lang, service_code, page=page, letter=letter)
 
 
 async def cb_country_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3980,7 +4188,10 @@ async def cb_country_select(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     is_adm = (role == ROLE_ADMIN or q.from_user.id == ADMIN_USER_ID)
 
     try:
-        _, service_code, country_key = q.data.split(":", 2)
+        parts = q.data.split(":")
+        service_code = parts[1]
+        country_key = parts[2]
+        letter = parts[3] if len(parts) > 3 and parts[3] else None
     except Exception:
         await safe_answer_callback(q, tt(lang, "expired"), show_alert=True)
         return
@@ -4041,7 +4252,7 @@ async def cb_country_select(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await safe_edit_message_markdown(
         q,
         text,
-        reply_markup=country_offers_keyboard(country_opts, service_code, country_key, page=0, lang=lang, is_admin=is_adm),
+        reply_markup=country_offers_keyboard(country_opts, service_code, country_key, page=0, lang=lang, is_admin=is_adm, letter=letter),
     )
 
 
@@ -4057,8 +4268,11 @@ async def cb_country_offers_page(update: Update, context: ContextTypes.DEFAULT_T
     is_adm = (role == ROLE_ADMIN or q.from_user.id == ADMIN_USER_ID)
 
     try:
-        _, service_code, country_key, p_str = q.data.split(":", 3)
-        page = max(0, int(p_str))
+        parts = q.data.split(":")
+        service_code = parts[1]
+        country_key = parts[2]
+        page = max(0, int(parts[3]))
+        letter = parts[4] if len(parts) > 4 and parts[4] else None
     except Exception:
         await safe_answer_callback(q, tt(lang, "expired"), show_alert=True)
         return
@@ -4084,7 +4298,7 @@ async def cb_country_offers_page(update: Update, context: ContextTypes.DEFAULT_T
     await safe_edit_message_markdown(
         q,
         text,
-        reply_markup=country_offers_keyboard(country_opts, service_code, country_key, page=page, lang=lang, is_admin=is_adm),
+        reply_markup=country_offers_keyboard(country_opts, service_code, country_key, page=page, lang=lang, is_admin=is_adm, letter=letter),
     )
 
 
@@ -5346,6 +5560,8 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(cb_service_page, pattern=r"^sp:"))
     app.add_handler(CallbackQueryHandler(cb_service_select, pattern=r"^sv:"))
     app.add_handler(CallbackQueryHandler(cb_sort_choice, pattern=r"^so:"))
+    app.add_handler(CallbackQueryHandler(cb_country_letter, pattern=r"^c_let:"))
+    app.add_handler(CallbackQueryHandler(cb_country_none, pattern=r"^c_none:"))
     app.add_handler(CallbackQueryHandler(cb_country_page, pattern=r"^cp_cy:"))
     app.add_handler(CallbackQueryHandler(cb_country_select, pattern=r"^csel:"))
     app.add_handler(CallbackQueryHandler(cb_country_offers_page, pattern=r"^pp_cy:"))
