@@ -1,5 +1,5 @@
 param(
-    [string]$RepoUrl = "https://github.com/s28626198-sys/otpbotv2.git",
+    [string]$RepoUrl = "https://s28626198-sys@github.com/s28626198-sys/otpbotv2.git",
     [string]$Branch = "main",
     [string]$CommitMessage = "Deploy-ready: Docker + Render web service config"
 )
