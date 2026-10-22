@@ -722,13 +722,24 @@ class PriceOption:
     provider_name: Optional[str]
     price: str
     base_price: str = "0"
+    panel: str = "SMSBower"
+    smscode_catalog_id: Optional[int] = None
+    smscode_product_id: Optional[int] = None
 
-    @property
-    def label(self) -> str:
+    def label_for(self, is_admin: bool = False) -> str:
         base = f"{to_flag(self.country_iso2)} {self.country_name}"
         if self.provider_name:
             base += f" • {self.provider_name}"
-        return f"{base} - ${self.price}"
+        tag = f" [{self.panel}]" if is_admin else ""
+        return f"{base} - ${self.price}{tag}"
+
+    @property
+    def label(self) -> str:
+        return self.label_for(False)
+
+    @property
+    def admin_label(self) -> str:
+        return self.label_for(True)
 
 
 class DB:
@@ -2450,6 +2461,9 @@ def apply_role_prices(opts: List[PriceOption], role: str, profit_pct: Decimal) -
                 provider_name=x.provider_name,
                 price=money(final),
                 base_price=money(base),
+                panel=x.panel,
+                smscode_catalog_id=x.smscode_catalog_id,
+                smscode_product_id=x.smscode_product_id,
             )
         )
     return out
@@ -2553,18 +2567,146 @@ def svc_keyboard(items: List[Dict[str, str]], page: int, lang: str, mode: str) -
     return InlineKeyboardMarkup(rows)
 
 
-def price_keyboard(opts: List[PriceOption], page: int, lang: str) -> InlineKeyboardMarkup:
+SMSCODE_SERVICE_MAP: Dict[str, int] = {
+    "wa": 1,   # WhatsApp
+    "tg": 2,   # Telegram
+    "ig": 3,   # Instagram
+    "fb": 4,   # Facebook
+    "go": 5,   # Google / Gmail / YouTube
+    "tw": 6,   # Twitter / X
+    "vi": 11,  # Viber
+    "tk": 14,  # TikTok
+    "am": 15,  # Amazon
+    "nf": 16,  # Netflix
+    "ds": 19,  # Discord
+    "wb": 23,  # WeChat
+    "ub": 24,  # Uber
+    "oi": 25,  # Tinder
+    "ka": 26,  # KakaoTalk
+    "ln": 27,  # LINE
+    "sn": 30,  # Snapchat
+}
+
+
+async def fetch_smscode_prices_for_service(
+    context: ContextTypes.DEFAULT_TYPE,
+    smscode_api: SMSCodeAPI,
+    service_code: str,
+    service_name: str,
+    lang: str,
+) -> List[PriceOption]:
+    bot_data = context.application.bot_data
+    c_cache = bot_data.get("smscode_countries")
+    if not c_cache:
+        try:
+            c_res = await smscode_api.get_countries()
+            c_items = c_res.get("data", []) if isinstance(c_res, dict) else []
+            c_cache = {c["id"]: c for c in c_items if isinstance(c, dict) and "id" in c}
+            bot_data["smscode_countries"] = c_cache
+        except Exception as e:
+            logger.warning("Could not cache SMSCode countries: %s", e)
+            c_cache = {}
+
+    platform_id = SMSCODE_SERVICE_MAP.get(service_code.lower())
+    if not platform_id:
+        s_cache = bot_data.get("smscode_services_map")
+        if s_cache is None:
+            try:
+                s_res = await smscode_api.get_services()
+                s_items = s_res.get("data", []) if isinstance(s_res, dict) else []
+                s_cache = {}
+                for s in s_items:
+                    n_clean = re.sub(r"[^a-z0-9]", "", str(s.get("name", "")).lower())
+                    c_clean = re.sub(r"[^a-z0-9]", "", str(s.get("code", "")).lower())
+                    if n_clean:
+                        s_cache[n_clean] = s["id"]
+                    if c_clean:
+                        s_cache[c_clean] = s["id"]
+                bot_data["smscode_services_map"] = s_cache
+            except Exception as e:
+                logger.warning("Could not cache SMSCode services map: %s", e)
+                s_cache = {}
+        svc_name_clean = re.sub(r"[^a-z0-9]", "", service_name.lower())
+        platform_id = s_cache.get(svc_name_clean) or s_cache.get(service_code.lower())
+
+    if not platform_id:
+        return []
+
+    try:
+        url = f"{smscode_api.base_url}/v2/catalog/products?platform_id={platform_id}&limit=50"
+        r = await smscode_api.http.get(url, headers=smscode_api._headers())
+        if r.status_code != 200:
+            return []
+        data = r.json().get("data", [])
+    except Exception as e:
+        logger.warning("Failed to fetch SMSCode products for platform_id=%s: %s", platform_id, e)
+        return []
+
+    out: List[PriceOption] = []
+    for p in data:
+        if not isinstance(p, dict):
+            continue
+        avail = p.get("available", 0)
+        if avail <= 0:
+            continue
+        price_val = p.get("price", {}).get("amount")
+        if not price_val:
+            continue
+        cid = p.get("country_id")
+        cinfo = c_cache.get(cid, {}) if c_cache else {}
+        cname = str(cinfo.get("name") or p.get("name") or f"Country {cid}")
+        ciso = cinfo.get("code")
+        price_str = str(price_val)
+        out.append(
+            PriceOption(
+                service_code=service_code,
+                service_name=service_name,
+                country_code=str(cid),
+                country_name=cname,
+                country_iso2=ciso,
+                provider_id=f"sc_{p.get('id')}",
+                provider_name=None,
+                price=price_str,
+                base_price=price_str,
+                panel="SMSCode",
+                smscode_catalog_id=p.get("catalog_product_id"),
+                smscode_product_id=p.get("id"),
+            )
+        )
+    return out
+
+
+def price_keyboard(
+    opts: List[PriceOption],
+    page: int,
+    lang: str,
+    is_admin: bool = False,
+    sort_mode: str = "price",
+) -> InlineKeyboardMarkup:
     start, end = page * PAGE_SIZE, (page + 1) * PAGE_SIZE
     rows = []
     for i in range(start, min(end, len(opts))):
-        rows.append([InlineKeyboardButton(opts[i].label, callback_data=f"by:{opts[i].service_code}:{i}")])
+        label = opts[i].label_for(is_admin)
+        rows.append([InlineKeyboardButton(label, callback_data=f"by:{opts[i].service_code}:{i}")])
     nav = []
     if page > 0:
-        nav.append(InlineKeyboardButton(tt(lang, "prev"), callback_data=f"pp:{opts[0].service_code}:{page - 1}"))
+        nav.append(InlineKeyboardButton(tt(lang, "prev"), callback_data=f"pp:{opts[0].service_code}:{page - 1}:{sort_mode}"))
     if end < len(opts):
-        nav.append(InlineKeyboardButton(tt(lang, "next"), callback_data=f"pp:{opts[0].service_code}:{page + 1}"))
+        nav.append(InlineKeyboardButton(tt(lang, "next"), callback_data=f"pp:{opts[0].service_code}:{page + 1}:{sort_mode}"))
     if nav:
         rows.append(nav)
+
+    if sort_mode == "price":
+        sort_btn_text = "🌍 কান্ট্রি অনুযায়ী সাজান" if lang == "bn" else "🌍 Sort by Country"
+        next_sort = "country"
+    else:
+        sort_btn_text = "💵 প্রাইস অনুযায়ী সাজান" if lang == "bn" else "💵 Sort by Price"
+        next_sort = "price"
+
+    rows.append([
+        InlineKeyboardButton(sort_btn_text, callback_data=f"so:{next_sort}:{opts[0].service_code}"),
+        InlineKeyboardButton(tt(lang, "home"), callback_data="hm"),
+    ])
     return InlineKeyboardMarkup(rows)
 
 
@@ -2592,9 +2734,17 @@ async def show_service_list(
     )
 
 
-async def show_prices(query, context: ContextTypes.DEFAULT_TYPE, lang: str, service_code: str, page: int = 0) -> None:
+async def show_prices(
+    query,
+    context: ContextTypes.DEFAULT_TYPE,
+    lang: str,
+    service_code: str,
+    page: int = 0,
+    sort_mode: str = "price",
+) -> None:
     b = context.application.bot_data
     api: TemplineAPI = b["api"]
+    smscode_api: Optional[SMSCodeAPI] = b.get("smscode_api")
     db = b["db"]
     name = b.get("svc_cache", {}).get("map", {}).get(service_code, service_code)
     countries = await cached_countries(context)
@@ -2607,18 +2757,42 @@ async def show_prices(query, context: ContextTypes.DEFAULT_TYPE, lang: str, serv
         except Exception:
             continue
     opts = parse_prices(payload, service_code, name, countries, lang) if payload else []
+    for o in opts:
+        o.panel = "SMSBower"
+
+    if smscode_api and smscode_api.api_key:
+        try:
+            sc_opts = await fetch_smscode_prices_for_service(context, smscode_api, service_code, name, lang)
+            opts.extend(sc_opts)
+        except Exception as e:
+            logger.warning("Failed to fetch SMSCode prices for %s: %s", service_code, e)
+
     user_id = query.from_user.id if query and query.from_user else 0
     user_row = await adb(db.get, user_id) if user_id else None
     role = role_of(user_row)
+    is_adm = (role == ROLE_ADMIN or user_id == ADMIN_USER_ID)
     profit_pct = await adb(db.get_profit_percent) if hasattr(db, "get_profit_percent") else Decimal("20")
     opts = apply_role_prices(opts, role, profit_pct)
+
+    if sort_mode == "country":
+        opts.sort(key=lambda x: (x.country_name.lower(), float(x.price) if re.match(r"^\d+(\.\d+)?$", x.price) else 999999.0))
+    else:
+        opts.sort(key=lambda x: (float(x.price) if re.match(r"^\d+(\.\d+)?$", x.price) else 999999.0, x.country_name.lower()))
+
     if not opts:
         await query.edit_message_text(f"⚠️ {md(tt(lang, 'prices_empty'))}", parse_mode=ParseMode.MARKDOWN_V2)
         return
     context.user_data[f"price_{service_code}"] = opts
     pages = (len(opts) - 1) // PAGE_SIZE + 1
-    text = f"🌍 *{md(tt(lang, 'prices', service=name))}*\n{md(f'Page {page + 1}/{pages}')}"
-    await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=price_keyboard(opts, page, lang))
+    sort_info = "💵 By Price" if sort_mode == "price" else "🌍 By Country"
+    if lang == "bn":
+        sort_info = "💵 প্রাইস অনুযায়ী" if sort_mode == "price" else "🌍 কান্ট্রি অনুযায়ী"
+    text = f"🌍 *{md(tt(lang, 'prices', service=name))}*\n{md(f'Page {page + 1}/{pages} • {sort_info}')}"
+    await query.edit_message_text(
+        text,
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=price_keyboard(opts, page, lang, is_admin=is_adm, sort_mode=sort_mode),
+    )
 
 
 async def start_poll_task(app: Application, aid: str) -> None:
@@ -3138,10 +3312,65 @@ async def cb_service_select(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not service_code:
         await safe_answer_callback(q, tt(lang, "expired"), show_alert=True)
         return
+
+    svc_name = (
+        context.application.bot_data.get("svc_cache", {}).get("map", {}).get(service_code)
+        or service_code
+    )
+
+    if lang == "bn":
+        prompt_text = f"📊 *{md(svc_name)}* এর নাম্বারগুলো আপনি কীভাবে দেখতে চান?"
+        btn_price = "💵 সর্বনিম্ন প্রাইস অনুযায়ী"
+        btn_country = "🌍 কান্ট্রি অনুযায়ী (A-Z)"
+        btn_back = "⬅️ পেছনে যান"
+    elif lang == "hi":
+        prompt_text = f"📊 *{md(svc_name)}* के लिए नंबर कैसे देखना चाहते हैं?"
+        btn_price = "💵 सबसे कम कीमत पहले"
+        btn_country = "🌍 देश के अनुसार (A-Z)"
+        btn_back = "⬅️ वापस"
+    elif lang == "ar":
+        prompt_text = f"📊 كيف تفضل عرض أرقام *{md(svc_name)}*؟"
+        btn_price = "💵 حسب السعر (الأقل أولاً)"
+        btn_country = "🌍 حسب الدولة (أ-ي)"
+        btn_back = "⬅️ رجوع"
+    elif lang == "ru":
+        prompt_text = f"📊 Выберите способ сортировки для *{md(svc_name)}*:"
+        btn_price = "💵 Сначала самые дешевые"
+        btn_country = "🌍 По стране (А-Я)"
+        btn_back = "⬅️ Назад"
+    else:
+        prompt_text = f"📊 *How would you like to view numbers for {md(svc_name)}?*"
+        btn_price = "💵 By Lowest Price First"
+        btn_country = "🌍 By Country Name (A-Z)"
+        btn_back = "⬅️ Back"
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(btn_price, callback_data=f"so:price:{service_code}")],
+        [InlineKeyboardButton(btn_country, callback_data=f"so:country:{service_code}")],
+        [InlineKeyboardButton(btn_back, callback_data="sp:all:0")],
+    ])
+    await q.edit_message_text(prompt_text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=kb)
+
+
+async def cb_sort_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    if not q or not q.from_user:
+        return
+    await safe_answer_callback(q)
+    db = context.application.bot_data["db"]
+    row = await adb(db.get, q.from_user.id) or {}
+    lang = lang_from_code(row.get("lang"))
+    try:
+        _, sort_mode, service_code = q.data.split(":", 2)
+    except Exception:
+        await safe_answer_callback(q, tt(lang, "expired"), show_alert=True)
+        return
+
     await q.edit_message_text(md(tt(lang, "load_prices")), parse_mode=ParseMode.MARKDOWN_V2)
     try:
-        await show_prices(q, context, lang, service_code, 0)
-    except Exception:
+        await show_prices(q, context, lang, service_code, 0, sort_mode=sort_mode)
+    except Exception as e:
+        logger.warning("show_prices failed: %s", e)
         await q.message.reply_text(
             md(tt(lang, "generic_fail")),
             parse_mode=ParseMode.MARKDOWN_V2,
@@ -3158,8 +3387,10 @@ async def cb_price_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     row = await adb(db.get, q.from_user.id) or {}
     lang = lang_from_code(row.get("lang"))
     try:
-        _, code, p = q.data.split(":")
-        page = max(0, int(p))
+        parts = q.data.split(":")
+        code = parts[1]
+        page = max(0, int(parts[2]))
+        sort_mode = parts[3] if len(parts) > 3 else "price"
     except Exception:
         await safe_answer_callback(q, tt(lang, "expired"), show_alert=True)
         return
@@ -3168,8 +3399,17 @@ async def cb_price_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await safe_answer_callback(q, tt(lang, "expired"), show_alert=True)
         return
     pages = (len(opts) - 1) // PAGE_SIZE + 1
-    text = f"🌍 *{md(tt(lang, 'prices', service=opts[0].service_name))}*\n{md(f'Page {page + 1}/{pages}')}"
-    await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=price_keyboard(opts, page, lang))
+    role = role_of(row)
+    is_adm = (role == ROLE_ADMIN or q.from_user.id == ADMIN_USER_ID)
+    sort_info = "💵 By Price" if sort_mode == "price" else "🌍 By Country"
+    if lang == "bn":
+        sort_info = "💵 প্রাইস অনুযায়ী" if sort_mode == "price" else "🌍 কান্ট্রি অনুযায়ী"
+    text = f"🌍 *{md(tt(lang, 'prices', service=opts[0].service_name))}*\n{md(f'Page {page + 1}/{pages} • {sort_info}')}"
+    await q.edit_message_text(
+        text,
+        parse_mode=ParseMode.MARKDOWN_V2,
+        reply_markup=price_keyboard(opts, page, lang, is_admin=is_adm, sort_mode=sort_mode),
+    )
 
 
 async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3205,22 +3445,45 @@ async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         deducted = True
     await q.edit_message_text(md(tt(lang, "wait")), parse_mode=ParseMode.MARKDOWN_V2)
-    try:
-        buy_args: Dict[str, Any] = {
-            "service": opt.service_code,
-            "country": opt.country_code,
-            "providerIds": opt.provider_id,
-        }
-        if base_cost > 0:
-            buy_args["fixPrice"] = money(base_cost)
-        payload = await api.call("getNumber", **buy_args)
-    except Exception as e:
-        logger.warning("getNumber failed (buy) user=%s args=%s err=%s", q.from_user.id, buy_args, e)
-        if deducted:
-            await adb(db.adjust_balance, q.from_user.id, charge)
-        await q.message.reply_text(md(tt(lang, "generic_fail")), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=main_menu(lang, role))
-        return
-    aid, phone, err = parse_number(payload)
+    aid: Optional[str] = None
+    phone: Optional[str] = None
+    err: Optional[str] = None
+
+    if opt.panel == "SMSCode":
+        smscode_api: Optional[SMSCodeAPI] = context.application.bot_data.get("smscode_api")
+        if not smscode_api or not smscode_api.api_key:
+            err = "SMSCode API not configured"
+        else:
+            try:
+                buy_res = await smscode_api.create_order(
+                    catalog_product_id=opt.smscode_catalog_id,
+                    product_id=opt.smscode_product_id,
+                    max_price=str(opt.base_price or opt.price),
+                )
+                orders = buy_res.get("data", {}).get("orders", []) if isinstance(buy_res, dict) else []
+                if orders:
+                    aid = f"sc_{orders[0]['id']}"
+                    phone = str(orders[0].get("phone_number") or "")
+                else:
+                    err = buy_res.get("error") or "NO_NUMBERS"
+            except Exception as e:
+                logger.warning("SMSCode create_order failed: %s", e)
+                err = str(e)
+    else:
+        try:
+            buy_args: Dict[str, Any] = {
+                "service": opt.service_code,
+                "country": opt.country_code,
+                "providerIds": opt.provider_id,
+            }
+            if base_cost > 0:
+                buy_args["fixPrice"] = money(base_cost)
+            payload = await api.call("getNumber", **buy_args)
+            aid, phone, err = parse_number(payload)
+        except Exception as e:
+            logger.warning("getNumber failed (buy) user=%s args=%s err=%s", q.from_user.id, buy_args, e)
+            aid, phone, err = None, None, "UNKNOWN"
+
     if err or not aid or not phone:
         if deducted:
             await adb(db.adjust_balance, q.from_user.id, charge)
@@ -3261,6 +3524,8 @@ async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         or opt.service_code
     )
     price_val = money(opt.price) if opt.price else "0"
+    if role == ROLE_ADMIN or q.from_user.id == ADMIN_USER_ID:
+        price_val = f"{price_val} [{opt.panel}]"
 
     text = tt(
         lang,
@@ -3328,23 +3593,45 @@ async def cb_another(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             await safe_answer_callback(q, tt(lang, "insufficient_wallet"), show_alert=True)
             return
         deducted = True
-    try:
-        buy_args: Dict[str, Any] = {
-            "service": service_code,
-            "country": country_code,
-            "providerIds": provider_id,
-        }
-        if base_cost > 0:
-            buy_args["fixPrice"] = money(base_cost)
-        payload = await api.call("getNumber", **buy_args)
-    except Exception as e:
-        logger.warning("getNumber failed (another) user=%s args=%s err=%s", q.from_user.id, buy_args, e)
-        if deducted:
-            await adb(db.adjust_balance, q.from_user.id, charge)
-        await q.message.reply_text(md(tt(lang, "generic_fail")), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=main_menu(lang, role))
-        return
+    aid: Optional[str] = None
+    phone: Optional[str] = None
+    err: Optional[str] = None
 
-    aid, phone, err = parse_number(payload)
+    if opt and opt.panel == "SMSCode":
+        smscode_api: Optional[SMSCodeAPI] = context.application.bot_data.get("smscode_api")
+        if not smscode_api or not smscode_api.api_key:
+            err = "SMSCode API not configured"
+        else:
+            try:
+                buy_res = await smscode_api.create_order(
+                    catalog_product_id=opt.smscode_catalog_id,
+                    product_id=opt.smscode_product_id,
+                    max_price=str(opt.base_price or opt.price),
+                )
+                orders = buy_res.get("data", {}).get("orders", []) if isinstance(buy_res, dict) else []
+                if orders:
+                    aid = f"sc_{orders[0]['id']}"
+                    phone = str(orders[0].get("phone_number") or "")
+                else:
+                    err = buy_res.get("error") or "NO_NUMBERS"
+            except Exception as e:
+                logger.warning("SMSCode create_order failed (another): %s", e)
+                err = str(e)
+    else:
+        try:
+            buy_args: Dict[str, Any] = {
+                "service": service_code,
+                "country": country_code,
+                "providerIds": provider_id,
+            }
+            if base_cost > 0:
+                buy_args["fixPrice"] = money(base_cost)
+            payload = await api.call("getNumber", **buy_args)
+            aid, phone, err = parse_number(payload)
+        except Exception as e:
+            logger.warning("getNumber failed (another) user=%s args=%s err=%s", q.from_user.id, buy_args, e)
+            aid, phone, err = None, None, "UNKNOWN"
+
     if err or not aid or not phone:
         if deducted:
             await adb(db.adjust_balance, q.from_user.id, charge)
@@ -3377,6 +3664,8 @@ async def cb_another(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         or service_code
     )
     price_val = money(opt.price) if (opt and opt.price) else (money(charge) if charge > 0 else "0")
+    if (role == ROLE_ADMIN or q.from_user.id == ADMIN_USER_ID) and opt and opt.panel:
+        price_val = f"{price_val} [{opt.panel}]"
 
     text = tt(
         lang,
@@ -4271,6 +4560,7 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(cb_deposit_review, pattern=r"^dp:"))
     app.add_handler(CallbackQueryHandler(cb_service_page, pattern=r"^sp:"))
     app.add_handler(CallbackQueryHandler(cb_service_select, pattern=r"^sv:"))
+    app.add_handler(CallbackQueryHandler(cb_sort_choice, pattern=r"^so:"))
     app.add_handler(CallbackQueryHandler(cb_price_page, pattern=r"^pp:"))
     app.add_handler(CallbackQueryHandler(cb_buy, pattern=r"^by:"))
     app.add_handler(CallbackQueryHandler(cb_another, pattern=r"^an:"))
