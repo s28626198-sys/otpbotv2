@@ -3898,19 +3898,10 @@ async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await adb(db.set_activation, q.from_user.id, q.message.chat_id, aid, opt.service_code, opt.country_code, opt.provider_id, phone)
 
     provider = opt.provider_name or tt(lang, "fallback_provider")
-    countries = context.application.bot_data.get("country_cache", {}).get("items") or {}
-    cinfo = countries.get(str(opt.country_code), {}) if isinstance(countries, dict) else {}
-    resolved_name = str(
-        cinfo.get("name")
-        or opt.country_name
-        or tt(lang, "fallback_country")
-    ).strip()
-    resolved_iso2 = (
-        cinfo.get("iso2")
-        or opt.country_iso2
-        or country_name_to_iso2(resolved_name)
-    )
-    country_display = f"{to_flag(resolved_iso2)} {resolved_name} ({opt.country_code})"
+    canonical_iso, canonical_name = canonical_country_info(opt.country_iso2, opt.country_name)
+    resolved_name = canonical_name or opt.country_name or tt(lang, "fallback_country")
+    resolved_iso2 = canonical_iso or opt.country_iso2 or country_name_to_iso2(resolved_name)
+    country_display = f"{to_flag(resolved_iso2)} {resolved_name}"
     service_name = (
         opt.service_name
         or context.application.bot_data.get("svc_cache", {}).get("map", {}).get(opt.service_code)
@@ -4045,11 +4036,25 @@ async def cb_another(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
     await adb(db.set_activation, q.from_user.id, q.message.chat_id, aid, service_code, country_code, provider_id, phone)
 
-    countries = context.application.bot_data.get("country_cache", {}).get("items") or {}
-    cinfo = countries.get(str(country_code), {}) if isinstance(countries, dict) else {}
-    resolved_name = str(cinfo.get("name") or (opt.country_name if opt else None) or tt(lang, "fallback_country")).strip()
-    resolved_iso2 = cinfo.get("iso2") or (opt.country_iso2 if opt else None) or country_name_to_iso2(resolved_name)
-    country_display = f"{to_flag(resolved_iso2)} {resolved_name} ({country_code})"
+    if opt and opt.country_name:
+        canonical_iso, canonical_name = canonical_country_info(opt.country_iso2, opt.country_name)
+        resolved_name = canonical_name or opt.country_name or tt(lang, "fallback_country")
+        resolved_iso2 = canonical_iso or opt.country_iso2 or country_name_to_iso2(resolved_name)
+    else:
+        if str(aid or "").startswith("sc_"):
+            sc_countries = context.application.bot_data.get("smscode_countries", {})
+            sc_info = sc_countries.get(str(country_code)) or (sc_countries.get(int(country_code)) if str(country_code).isdigit() else {})
+            c_name = sc_info.get("name") if sc_info else None
+            c_iso = sc_info.get("code") if sc_info else None
+        else:
+            countries = context.application.bot_data.get("country_cache", {}).get("items") or {}
+            cinfo = countries.get(str(country_code), {}) if isinstance(countries, dict) else {}
+            c_name = cinfo.get("name")
+            c_iso = cinfo.get("iso2")
+        canonical_iso, canonical_name = canonical_country_info(c_iso, c_name)
+        resolved_name = canonical_name or c_name or tt(lang, "fallback_country")
+        resolved_iso2 = canonical_iso or c_iso or country_name_to_iso2(resolved_name)
+    country_display = f"{to_flag(resolved_iso2)} {resolved_name}"
     provider = f"Provider {provider_id}" if provider_id else tt(lang, "fallback_provider")
     service_name = (
         (opt.service_name if opt else None)
