@@ -116,6 +116,8 @@ LANG_LABEL = {
 
 TR = {
     "en": {
+        "m_popular": "⭐ Popular Services",
+        "popular_services": "Popular Services",
         "m_select": "📋 Select Service",
         "m_search": "🔍 Search Service",
         "m_balance": "💰 Check Balance",
@@ -161,6 +163,8 @@ TR = {
         "admin_only": "🔒 Admin only bot. Access denied.",
     },
     "bn": {
+        "m_popular": "⭐ পপুলার সার্ভিস",
+        "popular_services": "পপুলার সার্ভিস",
         "m_select": "📋 সার্ভিস নির্বাচন",
         "m_search": "🔍 সার্ভিস খুঁজুন",
         "m_balance": "💰 ব্যালেন্স দেখুন",
@@ -174,6 +178,8 @@ TR = {
         "admin_only": "🔒 এই বট শুধু এডমিনের জন্য। আপনার এক্সেস নেই।",
     },
     "hi": {
+        "m_popular": "⭐ लोकप्रिय सेवाएं",
+        "popular_services": "लोकप्रिय सेवाएं",
         "m_select": "📋 सर्विस चुनें",
         "m_search": "🔍 सर्विस खोजें",
         "m_balance": "💰 बैलेंस देखें",
@@ -187,6 +193,8 @@ TR = {
         "admin_only": "🔒 यह बॉट केवल एडमिन के लिए है।",
     },
     "ar": {
+        "m_popular": "⭐ الخدمات الشائعة",
+        "popular_services": "الخدمات الشائعة",
         "m_select": "📋 اختيار الخدمة",
         "m_search": "🔍 بحث خدمة",
         "m_balance": "💰 فحص الرصيد",
@@ -200,6 +208,8 @@ TR = {
         "admin_only": "🔒 هذا البوت متاح للأدمن فقط.",
     },
     "ru": {
+        "m_popular": "⭐ Популярные сервисы",
+        "popular_services": "Популярные сервисы",
         "m_select": "📋 Выбрать сервис",
         "m_search": "🔍 Поиск сервиса",
         "m_balance": "💰 Баланс",
@@ -269,6 +279,7 @@ SERVICE_ALIAS = {
     "facebook": ["facebook", "fb", "ফেসবুক", "फेसबुक", "فيسبوك", "фейсбук"],
     "telegram": ["telegram", "tg", "টেলিগ্রাম", "टेलीग्राम", "تيليجرام", "телеграм"],
     "whatsapp": ["whatsapp", "wa", "হোয়াটসঅ্যাপ", "व्हाट्सऐप", "واتساب", "ватсап"],
+    "twilio": ["twilio", "tw", "টুইলিও", "টুইলো", "ट्विलियो", "تويليو", "твилио"],
     "instagram": ["instagram", "insta", "ইনস্টাগ্রাম", "इंस्टाग्राम", "انستغرام", "инстаграм"],
     "google": ["google", "gmail", "গুগল", "गूगल", "جوجل", "гугл"],
 }
@@ -501,6 +512,8 @@ def lang_from_code(code: Optional[str]) -> str:
 def detect_action(text: str) -> Optional[str]:
     cleaned = text.strip()
     for lg in LANGS:
+        if cleaned == tt(lg, "m_popular"):
+            return "popular"
         if cleaned == tt(lg, "m_select"):
             return "select"
         if cleaned == tt(lg, "m_search"):
@@ -517,7 +530,10 @@ def detect_action(text: str) -> Optional[str]:
 
 
 def main_menu(lang: str, role: str = ROLE_USER) -> ReplyKeyboardMarkup:
-    rows: List[List[str]] = [[tt(lang, "m_select")], [tt(lang, "m_search")]]
+    rows: List[List[str]] = [
+        [tt(lang, "m_popular")],
+        [tt(lang, "m_select"), tt(lang, "m_search")],
+    ]
     if role == ROLE_ADMIN:
         rows.append([tt(lang, "m_balance")])
         rows.append([tt(lang, "m_admin")])
@@ -2129,6 +2145,40 @@ def match_services(query: str, services: List[Dict[str, str]]) -> List[Dict[str,
     return uniq
 
 
+def _find_service(services: List[Dict[str, str]], codes: List[str], names: List[str], fallback: Dict[str, str]) -> Dict[str, str]:
+    for c in codes:
+        for s in services:
+            if s.get("code", "").strip().lower() == c.lower():
+                return s
+    for n in names:
+        for s in services:
+            if s.get("name", "").strip().lower() == n.lower():
+                return s
+    for n in names:
+        for s in services:
+            if n.lower() in s.get("name", "").strip().lower():
+                return s
+    return fallback
+
+
+def get_popular_services(services: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    targets = [
+        (["fb", "facebook"], ["facebook"], {"code": "fb", "name": "Facebook"}),
+        (["tg", "telegram"], ["telegram"], {"code": "tg", "name": "Telegram"}),
+        (["wa", "whatsapp"], ["whatsapp"], {"code": "wa", "name": "WhatsApp"}),
+        (["twilio", "tw"], ["twilio"], {"code": "twilio", "name": "Twilio"}),
+        (["ig", "instagram", "insta"], ["instagram"], {"code": "ig", "name": "Instagram"}),
+    ]
+    out, seen = [], set()
+    for codes, names, fb in targets:
+        s = _find_service(services, codes, names, fb)
+        code = s.get("code", "")
+        if code and code not in seen:
+            seen.add(code)
+            out.append(s)
+    return out
+
+
 def _collect_price_nodes(rows: List[Dict[str, Any]], country: str, node: Any, hint: Optional[str] = None) -> None:
     if isinstance(node, dict):
         price = None
@@ -2576,6 +2626,32 @@ async def cb_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         md(tt(lg, "lang_saved")),
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=main_menu(lg, role_of(row)),
+    )
+
+
+async def h_popular(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    db = context.application.bot_data["db"]
+    _, _, lang, role, _ = await ensure_user(update, db)
+    if not context.application.bot_data.get("svc_cache"):
+        await update.effective_message.reply_text(
+            md(tt(lang, "load_services")),
+            parse_mode=ParseMode.MARKDOWN_V2,
+            reply_markup=main_menu(lang, role),
+        )
+    try:
+        items = await cached_services(context)
+    except Exception:
+        items = []
+    popular = get_popular_services(items)
+    await show_service_list(
+        update,
+        context,
+        lang,
+        popular,
+        0,
+        "pop",
+        tt(lang, "popular_services"),
+        role,
     )
 
 
@@ -3152,6 +3228,9 @@ async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if await process_text_state(update, context):
         return
     action = detect_action(update.effective_message.text or "")
+    if action == "popular":
+        await h_popular(update, context)
+        return
     if action == "select":
         await h_select(update, context)
         return
@@ -3568,6 +3647,7 @@ async def post_init(app: Application) -> None:
     await app.bot.set_my_commands(
         [
             BotCommand("start", "Start"),
+            BotCommand("popular", "Popular services"),
             BotCommand("language", "Change language"),
             BotCommand("cancel", "Cancel activation"),
             BotCommand("admin", "Admin panel"),
@@ -3709,11 +3789,13 @@ def build_app() -> Application:
     )
 
     app.add_handler(CommandHandler("start", h_start))
+    app.add_handler(CommandHandler("popular", h_popular))
     app.add_handler(CommandHandler("language", h_lang))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("admin", h_admin_panel))
     app.add_handler(search_conv)
 
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(menu_regex("m_popular")), h_popular))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(menu_regex("m_select")), h_select))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(menu_regex("m_balance")), h_balance))
     app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, h_photo_state))
