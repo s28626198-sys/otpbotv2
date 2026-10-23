@@ -3959,6 +3959,8 @@ async def notify_admin_new_user(context: ContextTypes.DEFAULT_TYPE, row: Dict[st
 
 
 async def h_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _clear_deposit_state(context)
+    _clear_admin_state(context)
     db = context.application.bot_data["db"]
     user_id, _, lang, role, is_new = await ensure_user(update, db)
     row = await adb(db.get, user_id) or {}
@@ -4008,6 +4010,8 @@ async def cb_lang(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def h_popular(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _clear_deposit_state(context)
+    _clear_admin_state(context)
     db = context.application.bot_data["db"]
     _, _, lang, role, _ = await ensure_user(update, db)
     if not context.application.bot_data.get("svc_cache"):
@@ -4034,6 +4038,8 @@ async def h_popular(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def h_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _clear_deposit_state(context)
+    _clear_admin_state(context)
     db = context.application.bot_data["db"]
     _, _, lang, role, _ = await ensure_user(update, db)
     if not context.application.bot_data.get("svc_cache"):
@@ -4055,6 +4061,8 @@ async def h_select(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def h_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _clear_deposit_state(context)
+    _clear_admin_state(context)
     db = context.application.bot_data["db"]
     user_id, _, lang, role, _ = await ensure_user(update, db)
     user_row = await adb(db.get, user_id) or {}
@@ -4130,6 +4138,8 @@ async def h_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def h_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _clear_deposit_state(context)
+    _clear_admin_state(context)
     db = context.application.bot_data["db"]
     user_id, _, lang, role, _ = await ensure_user(update, db)
     history = await adb(db.list_user_activations, user_id, 8) if hasattr(db, "list_user_activations") else []
@@ -5222,6 +5232,8 @@ async def _get_panel_balances(
 
 
 async def h_balance(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    _clear_deposit_state(context)
+    _clear_admin_state(context)
     db = context.application.bot_data["db"]
     _, _, lang, role, _ = await ensure_user(update, db)
     if role in {ROLE_USER, ROLE_SUPER}:
@@ -5361,6 +5373,8 @@ async def cb_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    _clear_deposit_state(context)
+    _clear_admin_state(context)
     db = context.application.bot_data["db"]
     _, _, lang, role, _ = await ensure_user(update, db)
     act = await adb(db.latest_active_activation_for_user, update.effective_user.id)
@@ -5424,36 +5438,39 @@ async def cb_copy_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     db = context.application.bot_data["db"]
     _, _, lang, role, _ = await ensure_user(update, db)
+    text = (update.effective_message.text or "").strip()
+    action = detect_action(text)
+    if action:
+        _clear_deposit_state(context)
+        _clear_admin_state(context)
+        if action == "popular":
+            await h_popular(update, context)
+            return
+        if action == "profile":
+            await h_profile(update, context)
+            return
+        if action == "history":
+            await h_history(update, context)
+            return
+        if action == "select":
+            await h_select(update, context)
+            return
+        if action == "search":
+            await h_search_entry(update, context)
+            return
+        if action in ("balance", "wallet"):
+            await h_balance(update, context)
+            return
+        if action == "deposit":
+            await h_deposit_entry(update, context)
+            return
+        if action == "admin_panel":
+            await h_admin_panel(update, context)
+            return
+
     if await process_text_state(update, context):
         return
-    action = detect_action(update.effective_message.text or "")
-    if action == "popular":
-        await h_popular(update, context)
-        return
-    if action == "profile":
-        await h_profile(update, context)
-        return
-    if action == "history":
-        await h_history(update, context)
-        return
-    if action == "select":
-        await h_select(update, context)
-        return
-    if action == "search":
-        await h_search_entry(update, context)
-        return
-    if action == "balance":
-        await h_balance(update, context)
-        return
-    if action == "wallet":
-        await h_balance(update, context)
-        return
-    if action == "deposit":
-        await h_deposit_entry(update, context)
-        return
-    if action == "admin_panel":
-        await h_admin_panel(update, context)
-        return
+
     await update.effective_message.reply_text(
         md(tt(lang, "unknown")),
         parse_mode=ParseMode.MARKDOWN_V2,
@@ -5828,12 +5845,6 @@ async def process_text_state(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return True
 
     dep_state = context.user_data.get("dep_state")
-    if dep_state != DEPOSIT_AMOUNT_STATE and dep_state != DEPOSIT_PROOF_STATE:
-        open_dep = await adb(db.latest_open_deposit_for_user, update.effective_user.id)
-        if open_dep:
-            dep_state = DEPOSIT_PROOF_STATE
-            context.user_data["dep_state"] = DEPOSIT_PROOF_STATE
-            context.user_data["dep_id"] = int(open_dep["id"])
     if dep_state == DEPOSIT_AMOUNT_STATE and role in {ROLE_USER, ROLE_SUPER}:
         amount = dec(text, "-1")
         if amount < MIN_DEPOSIT_USD:
@@ -6089,6 +6100,9 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("language", h_lang))
     app.add_handler(CommandHandler("cancel", cmd_cancel))
     app.add_handler(CommandHandler("admin", h_admin_panel))
+    app.add_handler(CommandHandler("balance", h_balance))
+    app.add_handler(CommandHandler("wallet", h_balance))
+    app.add_handler(CommandHandler("deposit", h_deposit_entry))
     app.add_handler(search_conv)
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(menu_regex("m_popular")), h_popular))
@@ -6096,6 +6110,8 @@ def build_app() -> Application:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(menu_regex("m_history")), h_history))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(menu_regex("m_select")), h_select))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(menu_regex("m_balance")), h_balance))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(menu_regex("m_wallet")), h_balance))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(menu_regex("m_deposit")), h_deposit_entry))
     app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, h_photo_state))
 
     app.add_handler(CallbackQueryHandler(cb_profile_actions, pattern=r"^btn_"))
