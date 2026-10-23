@@ -4779,14 +4779,16 @@ async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     logger.info("Purchase succeeded: aid=%s phone=%s user_id=%s panel=%s", aid, phone, q.from_user.id, panel)
 
+    saved_pid = f"sc:{smscode_product_id}" if panel == "SMSCode" and smscode_product_id else provider_id
+    saved_country = country_code or (country_iso2 or "SMSCode" if panel == "SMSCode" else "")
     await adb(
         db.add_activation,
         q.from_user.id,
         q.message.chat_id,
         aid,
         service_code,
-        country_code,
-        provider_id,
+        saved_country,
+        saved_pid,
         phone,
         base_price=base_cost,
         charged_price=charge if role in {ROLE_USER, ROLE_SUPER} else 0,
@@ -4812,7 +4814,11 @@ async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         service=service_name,
         price=price_val,
     )
-    another_cb = f"an:{service_code}:{country_code}:{provider_id or 'none'}"
+    if panel == "SMSCode" and smscode_product_id:
+        another_cb = f"an:sc:{service_code}:{smscode_product_id}:{price_str}"
+    else:
+        pid_clean = str(provider_id or "0").strip()
+        another_cb = f"an:sb:{service_code}:{country_code}:{pid_clean}:{base_cost_str}:{price_str}"
     kb = InlineKeyboardMarkup(
         [
             [copy_button(tt(lang, "copy_num"), phone, f"cp:num:{q.from_user.id}")],
@@ -4835,63 +4841,165 @@ async def cb_another(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await safe_answer_callback(q)
     db = context.application.bot_data["db"]
     api: TemplineAPI = context.application.bot_data["api"]
+    smscode_api: Optional[SMSCodeAPI] = context.application.bot_data.get("smscode_api")
     row = await adb(db.get, q.from_user.id) or {}
     lang = lang_from_code(row.get("lang"))
     role = role_of(row)
+    is_admin = (role == ROLE_ADMIN or q.from_user.id == ADMIN_USER_ID)
+
+    data = q.data or ""
+    parts = data.split(":")
+
+    panel: str = "SMSBower"
+    service_code: str = ""
+    country_code: str = ""
+    provider_id: Optional[str] = None
+    base_cost_str: str = "0"
+    price_str: str = "0"
+    smscode_product_id: Optional[int] = None
+    country_name: str = ""
+    country_iso2: Optional[str] = None
+    service_name: str = ""
+    provider_name: Optional[str] = None
+
+    if len(parts) >= 5 and parts[1] == "sc":
+        # Format: an:sc:{service}:{product_id}:{price}
+        panel = "SMSCode"
+        service_code = parts[2]
+        try:
+            smscode_product_id = int(parts[3])
+        except Exception:
+            smscode_product_id = None
+        price_str = parts[4] if len(parts) > 4 else "0"
+        base_cost_str = price_str
+
+    elif len(parts) >= 6 and parts[1] == "sb":
+        # Format: an:sb:{service}:{country}:{provider}:{base_price}:{price}
+        panel = "SMSBower"
+        service_code = parts[2]
+        country_code = parts[3]
+        provider_id = parts[4] if parts[4] not in ("0", "none", "null") else None
+        base_cost_str = parts[5]
+        price_str = parts[6] if len(parts) > 6 else base_cost_str
+
+    else:
+        # Legacy format: an:{service_code}:{country_code}:{provider_token}
+        try:
+            service_code = parts[1]
+            country_token = parts[2] if len(parts) > 2 else ""
+            provider_token = parts[3] if len(parts) > 3 else "none"
+        except Exception:
+            service_code = ""
+            country_token = ""
+            provider_token = "none"
+
+        found_aid = None
+        if q.message and q.message.reply_markup and q.message.reply_markup.inline_keyboard:
+            for row_btn in q.message.reply_markup.inline_keyboard:
+                for btn in row_btn:
+                    if btn.callback_data and btn.callback_data.startswith("cx:"):
+                        found_aid = btn.callback_data.removeprefix("cx:")
+                        break
+                if found_aid:
+                    break
+
+        orig_act = None
+        if found_aid:
+            orig_act = await adb(db.get_activation, found_aid)
+        if not orig_act:
+            recent_acts = await adb(db.list_user_activations, q.from_user.id, 1)
+            if recent_acts:
+                orig_act = recent_acts[0]
+                if not found_aid:
+                    found_aid = str(orig_act.get("activation_id") or "")
+
+        if found_aid and (found_aid.startswith("sc_") or (orig_act and orig_act.get("provider") == "smscode")):
+            panel = "SMSCode"
+            service_code = (orig_act.get("service_code") if orig_act else None) or service_code or "wa"
+            price_str = str((orig_act.get("charged_price") if orig_act else None) or "0")
+            base_cost_str = str((orig_act.get("base_price") if orig_act else None) or price_str)
+            raw_id = found_aid.removeprefix("sc_")
+
+            pid_val = str((orig_act.get("provider_id") if orig_act else "") or "")
+            if pid_val.startswith("sc:"):
+                try:
+                    smscode_product_id = int(pid_val.removeprefix("sc:"))
+                except Exception:
+                    smscode_product_id = None
+
+            if not smscode_product_id and smscode_api and raw_id.isdigit():
+                try:
+                    order_res = await smscode_api.get_order(raw_id)
+                    order_data = order_res.get("data", {}) if isinstance(order_res, dict) else {}
+                    smscode_product_id = order_data.get("product_id")
+                    if not price_str or price_str == "0":
+                        price_str = str(order_data.get("amount", {}).get("amount") or "0")
+                        base_cost_str = price_str
+                except Exception as e:
+                    logger.warning("Could not fetch smscode order for legacy an: aid=%s: %s", found_aid, e)
+        else:
+            panel = "SMSBower"
+            country_code = (orig_act.get("country_code") if orig_act else None) or country_token
+            provider_id = (orig_act.get("provider_id") if orig_act else None) or (provider_token if provider_token not in ("0", "none", "null") else None)
+            base_cost_str = str((orig_act.get("base_price") if orig_act else None) or "0")
+            price_str = str((orig_act.get("charged_price") if orig_act else None) or base_cost_str)
+
+        # Fallback to context.user_data if available
+        if (panel == "SMSCode" and not smscode_product_id) or (panel == "SMSBower" and not country_code):
+            for v in (context.user_data.get(f"price_{service_code}") or []):
+                if panel == "SMSCode" and v.panel == "SMSCode":
+                    smscode_product_id = v.smscode_product_id
+                    price_str = str(v.price or "0")
+                    base_cost_str = str(v.base_price or price_str)
+                    break
+                elif panel == "SMSBower" and v.panel == "SMSBower" and str(v.country_code) == str(country_code):
+                    provider_id = v.provider_id
+                    price_str = str(v.price or "0")
+                    base_cost_str = str(v.base_price or price_str)
+                    break
 
     try:
-        _, service_code, country_code, provider_token = q.data.split(":", 3)
+        wait_msg = await q.message.reply_text(
+            md(tt(lang, "wait")),
+            parse_mode=ParseMode.MARKDOWN_V2,
+        )
     except Exception:
-        await safe_answer_callback(q, tt(lang, "expired"), show_alert=True)
-        return
+        wait_msg = await q.message.reply_text("⏳ Waiting for SMS...")
 
-    provider_id: Optional[str] = None if provider_token in {"", "none", "null"} else provider_token
-
-    await q.message.reply_text(
-        md(tt(lang, "wait")),
-        parse_mode=ParseMode.MARKDOWN_V2,
-    )
-    price_map: Dict[Tuple[str, str, str], PriceOption] = {}
-    for v in (context.user_data.get(f"price_{service_code}") or []):
-        k = (str(v.service_code), str(v.country_code), str(v.provider_id or "none"))
-        price_map[k] = v
-    opt = price_map.get((service_code, country_code, provider_token))
-    if opt is None:
-        opt = price_map.get((service_code, country_code, "none"))
-    charge = dec(opt.price, "0") if opt else Decimal("0")
-    base_cost = dec(opt.base_price or opt.price, "0") if opt else Decimal("0")
     panels = await adb(db.get_panel_status) if hasattr(db, "get_panel_status") else {"smsbower": True, "smscode": True}
-    is_smscode_panel = bool(opt and opt.panel == "SMSCode")
-    if is_smscode_panel and not panels.get("smscode", True):
+    if panel == "SMSCode" and not panels.get("smscode", True):
         msg = "⚠️ SMSCode প্যানেলটি এডমিন কর্তৃক বন্ধ রাখা হয়েছে।" if lang == "bn" else "⚠️ SMSCode panel is currently disabled."
-        await safe_answer_callback(q, msg, show_alert=True)
+        await safe_edit_message_markdown(wait_msg, md(msg), reply_markup=main_menu(lang, role))
         return
-    if not is_smscode_panel and not panels.get("smsbower", True):
+    if panel == "SMSBower" and not panels.get("smsbower", True):
         msg = "⚠️ SMSBower প্যানেলটি এডমিন কর্তৃক বন্ধ রাখা হয়েছে।" if lang == "bn" else "⚠️ SMSBower panel is currently disabled."
-        await safe_answer_callback(q, msg, show_alert=True)
+        await safe_edit_message_markdown(wait_msg, md(msg), reply_markup=main_menu(lang, role))
         return
+
+    charge = dec(price_str, "0")
+    base_cost = dec(base_cost_str, "0")
     deducted = False
-    if role in {ROLE_USER, ROLE_SUPER}:
+    if role in {ROLE_USER, ROLE_SUPER} and charge > 0:
         bal = await adb(db.adjust_balance, q.from_user.id, -charge, require_non_negative=True)
         if bal is None:
-            await safe_answer_callback(q, tt(lang, "insufficient_wallet"), show_alert=True)
+            await safe_edit_message_markdown(wait_msg, md(tt(lang, "insufficient_wallet")), reply_markup=main_menu(lang, role))
             return
         deducted = True
+
     aid: Optional[str] = None
     phone: Optional[str] = None
     err: Optional[str] = None
 
-    if opt and opt.panel == "SMSCode":
-        smscode_api: Optional[SMSCodeAPI] = context.application.bot_data.get("smscode_api")
+    if panel == "SMSCode":
         if not smscode_api or not smscode_api.api_key:
             err = "SMSCode API not configured"
+        elif not smscode_product_id:
+            err = "NO_NUMBERS"
         else:
             try:
-                buy_res = await smscode_api.create_order(
-                    product_id=opt.smscode_product_id,
-                    catalog_product_id=opt.smscode_catalog_id if not opt.smscode_product_id else None,
-                    max_price=str(opt.base_price or opt.price) if not opt.smscode_product_id else None,
-                )
+                logger.info("cb_another: Calling SMSCode create_order for product_id=%s max_price=%s", smscode_product_id, base_cost_str)
+                buy_res = await smscode_api.create_order(product_id=smscode_product_id)
+                logger.info("cb_another: SMSCode create_order result: %s", buy_res)
                 orders = buy_res.get("data", {}).get("orders", []) if isinstance(buy_res, dict) else []
                 if orders:
                     aid = f"sc_{orders[0]['id']}"
@@ -4916,8 +5024,10 @@ async def cb_another(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 buy_args["maxPrice"] = cost_str
                 buy_args["fixPrice"] = cost_str
 
+            logger.info("cb_another: Calling SMSBower getNumber: %s", buy_args)
             payload = await api.call("getNumber", **buy_args)
             aid, phone, err = parse_number(payload)
+            logger.info("cb_another: SMSBower getNumber result: aid=%s phone=%s err=%s", aid, phone, err)
 
             if (err == "NO_NUMBERS" or not aid) and "providerIds" in buy_args:
                 logger.info(
@@ -4940,51 +5050,57 @@ async def cb_another(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     if err or not aid or not phone:
         if deducted:
             await adb(db.adjust_balance, q.from_user.id, charge)
-        await q.message.reply_text(md(api_error(lang, err or "UNKNOWN")), parse_mode=ParseMode.MARKDOWN_V2, reply_markup=main_menu(lang, role))
+        err_msg = api_error(lang, err or "UNKNOWN")
+        logger.warning("cb_another purchase failed: err=%s translated=%s user_id=%s", err, err_msg, q.from_user.id)
+        await safe_edit_message_markdown(wait_msg, md(err_msg), reply_markup=main_menu(lang, role))
         return
 
+    logger.info("cb_another purchase succeeded: aid=%s phone=%s user_id=%s panel=%s", aid, phone, q.from_user.id, panel)
+
+    saved_pid = f"sc:{smscode_product_id}" if panel == "SMSCode" and smscode_product_id else provider_id
+    saved_country = country_code or (country_iso2 or "SMSCode" if panel == "SMSCode" else "")
     await adb(
         db.add_activation,
         q.from_user.id,
         q.message.chat_id,
         aid,
         service_code,
-        country_code,
-        provider_id,
+        saved_country,
+        saved_pid,
         phone,
         base_price=base_cost,
         charged_price=charge if role in {ROLE_USER, ROLE_SUPER} else 0,
     )
     await adb(db.set_activation, q.from_user.id, q.message.chat_id, aid, service_code, country_code, provider_id, phone)
 
-    if opt and opt.country_name:
-        canonical_iso, canonical_name = canonical_country_info(opt.country_iso2, opt.country_name)
-        resolved_name = canonical_name or opt.country_name or tt(lang, "fallback_country")
-        resolved_iso2 = canonical_iso or opt.country_iso2 or country_name_to_iso2(resolved_name)
-    else:
-        if str(aid or "").startswith("sc_"):
-            sc_countries = context.application.bot_data.get("smscode_countries", {})
-            sc_info = sc_countries.get(str(country_code)) or (sc_countries.get(int(country_code)) if str(country_code).isdigit() else {})
-            c_name = sc_info.get("name") if sc_info else None
-            c_iso = sc_info.get("code") if sc_info else None
+    if not service_name:
+        svc_map = context.application.bot_data.get("svc_cache", {}).get("map", {})
+        service_name = svc_map.get(service_code) or service_code.upper()
+
+    if not country_name:
+        if panel == "SMSBower":
+            c_cache = context.application.bot_data.get("countries", {})
+            c_info = c_cache.get(country_code) or {}
+            country_name = c_info.get("name") or f"Country {country_code}"
+            country_iso2 = c_info.get("iso")
         else:
-            countries = context.application.bot_data.get("country_cache", {}).get("items") or {}
-            cinfo = countries.get(str(country_code), {}) if isinstance(countries, dict) else {}
-            c_name = cinfo.get("name")
-            c_iso = cinfo.get("iso2")
-        canonical_iso, canonical_name = canonical_country_info(c_iso, c_name)
-        resolved_name = canonical_name or c_name or tt(lang, "fallback_country")
-        resolved_iso2 = canonical_iso or c_iso or country_name_to_iso2(resolved_name)
+            sc_cache = context.application.bot_data.get("smscode_countries", {})
+            c_info = sc_cache.get(country_code) or {}
+            country_name = c_info.get("name")
+            country_iso2 = c_info.get("code")
+            if not country_name and phone:
+                if phone.startswith("+62") or phone.startswith("62"):
+                    country_name = "Indonesia"
+                    country_iso2 = "ID"
+
+    canonical_iso, canonical_name = canonical_country_info(country_iso2, country_name)
+    resolved_name = canonical_name or country_name or tt(lang, "fallback_country")
+    resolved_iso2 = canonical_iso or country_iso2 or country_name_to_iso2(resolved_name)
     country_display = f"{to_flag(resolved_iso2)} {resolved_name}"
-    provider = f"Provider {provider_id}" if provider_id else tt(lang, "fallback_provider")
-    service_name = (
-        (opt.service_name if opt else None)
-        or context.application.bot_data.get("svc_cache", {}).get("map", {}).get(service_code)
-        or service_code
-    )
-    price_val = money(opt.price) if (opt and opt.price) else (money(charge) if charge > 0 else "0")
-    if (role == ROLE_ADMIN or q.from_user.id == ADMIN_USER_ID) and opt and opt.panel:
-        price_val = f"{price_val} [{opt.panel}]"
+
+    price_val = money(price_str) if price_str else "0"
+    if is_admin:
+        price_val = f"{price_val} [{panel}]"
 
     text = tt(
         lang,
@@ -4992,12 +5108,17 @@ async def cb_another(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         phone="TOKENPHONEVAL",
         aid="TOKENAIDVAL",
         country=country_display,
-        provider=provider,
+        provider=provider_name or tt(lang, "fallback_provider"),
         service=service_name,
         price=price_val,
     )
-    provider_token_new = provider_id if provider_id else "none"
-    another_cb = f"an:{service_code}:{country_code}:{provider_token_new}"
+
+    if panel == "SMSCode" and smscode_product_id:
+        another_cb = f"an:sc:{service_code}:{smscode_product_id}:{price_str}"
+    else:
+        pid_clean = str(provider_id or "0").strip()
+        another_cb = f"an:sb:{service_code}:{country_code}:{pid_clean}:{base_cost_str}:{price_str}"
+
     kb = InlineKeyboardMarkup(
         [
             [copy_button(tt(lang, "copy_num"), phone, f"cp:num:{q.from_user.id}")],
@@ -5005,9 +5126,10 @@ async def cb_another(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             [InlineKeyboardButton(tt(lang, "cancel"), callback_data=f"cx:{aid}", style="danger")],
         ]
     )
-    await q.message.reply_text(
+
+    await safe_edit_message_markdown(
+        wait_msg,
         md(text).replace("TOKENPHONEVAL", cd(phone)).replace("TOKENAIDVAL", cd(aid)),
-        parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=kb,
     )
     await start_poll_task(context.application, aid)
