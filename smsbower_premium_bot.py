@@ -875,15 +875,30 @@ async def safe_reply_markdown(message, text: str, reply_markup=None) -> None:
 
 
 async def safe_edit_message_markdown(query_or_msg, text: str, reply_markup=None) -> None:
+    edit_fn = getattr(query_or_msg, "edit_message_text", None) or getattr(query_or_msg, "edit_text", None)
+    if not edit_fn:
+        return
     try:
-        await query_or_msg.edit_message_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup)
+        await edit_fn(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=reply_markup)
     except BadRequest as e:
         logger.warning("Markdown edit failed, falling back to plain text: %s", e)
         plain = re.sub(r"\\([_\\*\\[\\]()~`>#+\\-=|{}.!])", r"\1", text)
         try:
-            await query_or_msg.edit_message_text(plain, reply_markup=reply_markup)
-        except Exception:
-            pass
+            await edit_fn(plain, reply_markup=reply_markup)
+        except Exception as e2:
+            logger.warning("Plain text edit failed: %s", e2)
+            if hasattr(query_or_msg, "reply_text"):
+                try:
+                    await query_or_msg.reply_text(plain, reply_markup=reply_markup)
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.warning("safe_edit_message_markdown error: %s", e)
+        if hasattr(query_or_msg, "reply_text"):
+            try:
+                await query_or_msg.reply_text(text, reply_markup=reply_markup)
+            except Exception:
+                pass
 
 
 async def adb(fn, *args, **kwargs):
