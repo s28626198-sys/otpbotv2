@@ -17,6 +17,16 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from urllib.parse import urlparse
 
 import httpx
+
+try:
+    import httpcore
+    HTTPCORE_ERRORS: Tuple[type, ...] = (
+        getattr(httpcore, "RemoteProtocolError", Exception),
+        getattr(httpcore, "NetworkError", Exception),
+        getattr(httpcore, "TimeoutException", Exception),
+    )
+except Exception:
+    HTTPCORE_ERRORS = ()
 from supabase import create_client
 from telegram import (
     BotCommand,
@@ -877,7 +887,41 @@ async def safe_edit_message_markdown(query_or_msg, text: str, reply_markup=None)
 
 
 async def adb(fn, *args, **kwargs):
-    return await asyncio.to_thread(fn, *args, **kwargs)
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            return await asyncio.to_thread(fn, *args, **kwargs)
+        except Exception as exc:
+            err_str = str(exc).lower()
+            err_type = type(exc).__name__.lower()
+            is_transient = (
+                isinstance(exc, (httpx.TransportError, ConnectionError, TimeoutError, OSError, *HTTPCORE_ERRORS))
+                or "disconnect" in err_str
+                or "connection" in err_str
+                or "remoteprotocolerror" in err_type
+                or "reset by peer" in err_str
+                or "broken pipe" in err_str
+                or "timeout" in err_str
+            )
+            if is_transient and attempt < max_retries:
+                logger.warning(
+                    "Database operation %s encountered transient network/protocol error (%s: %s); retrying (%d/%d)...",
+                    getattr(fn, "__name__", str(fn)),
+                    type(exc).__name__,
+                    exc,
+                    attempt,
+                    max_retries,
+                )
+                await asyncio.sleep(0.4 * attempt)
+            else:
+                if is_transient:
+                    logger.error(
+                        "Database operation %s failed after %d attempts: %s",
+                        getattr(fn, "__name__", str(fn)),
+                        max_retries,
+                        exc,
+                    )
+                raise
 
 
 @dataclass
@@ -3656,125 +3700,157 @@ async def start_poll_task(app: Application, aid: str) -> None:
     tasks: Dict[str, asyncio.Task] = app.bot_data["tasks"]
 
     async def run() -> None:
-        while True:
-            await asyncio.sleep(POLL_SECONDS)
-            act = await adb(db.get_activation, aid)
-            if not act:
-                break
-            if act.get("status") != "active":
-                break
-            created_at = int(act.get("created_at") or time.time())
-            if int(time.time()) - created_at >= MAX_MONITOR_SECONDS:
-                await adb(db.set_activation_status, aid, "expired")
-                refund = await adb(db.refund_activation_if_needed, aid)
-                if refund:
-                    user_row = await adb(db.get, int(act.get("user_id"))) or {}
-                    lang = lang_from_code(user_row.get("lang"))
-                    await app.bot.send_message(
-                        int(act.get("chat_id")),
-                        md(tt(lang, "otp_timeout_refund", amount=refund.get("amount"))),
-                        parse_mode=ParseMode.MARKDOWN_V2,
-                        reply_markup=main_menu(lang, role_of(user_row)),
-                    )
-                break
+        try:
+            while True:
+                await asyncio.sleep(POLL_SECONDS)
+                try:
+                    act = await adb(db.get_activation, aid)
+                except Exception as e:
+                    logger.warning("Polling aid=%s: failed to fetch activation record: %s (will retry)", aid, e)
+                    continue
 
-            user_id = int(act.get("user_id"))
-            chat_id = int(act.get("chat_id"))
-            user_row = await adb(db.get, user_id) or {}
-            lang = lang_from_code(user_row.get("lang"))
-            is_smscode = bool(act.get("provider") == "smscode" or str(aid).startswith("sc_"))
-            if is_smscode and smscode_api:
+                if not act:
+                    logger.info("Polling aid=%s: activation record not found or removed; ending task", aid)
+                    break
+                if act.get("status") != "active":
+                    break
+
+                created_at = int(act.get("created_at") or time.time())
+                if int(time.time()) - created_at >= MAX_MONITOR_SECONDS:
+                    try:
+                        await adb(db.set_activation_status, aid, "expired")
+                        refund = await adb(db.refund_activation_if_needed, aid)
+                        if refund:
+                            user_row = await adb(db.get, int(act.get("user_id"))) or {}
+                            lang = lang_from_code(user_row.get("lang"))
+                            await app.bot.send_message(
+                                int(act.get("chat_id")),
+                                md(tt(lang, "otp_timeout_refund", amount=refund.get("amount"))),
+                                parse_mode=ParseMode.MARKDOWN_V2,
+                                reply_markup=main_menu(lang, role_of(user_row)),
+                            )
+                    except Exception as e:
+                        logger.error("Polling aid=%s: error handling expiration/refund: %s", aid, e)
+                    break
+
+                user_id = int(act.get("user_id"))
+                chat_id = int(act.get("chat_id"))
                 try:
-                    raw_id = str(aid).removeprefix("sc_")
-                    order_res = await smscode_api.get_order(raw_id)
-                    order_data = order_res.get("data", {}) if isinstance(order_res, dict) else {}
-                    st_code = str(order_data.get("status", "")).upper()
-                    if st_code in {"RECEIVED", "COMPLETED", "FINISHED", "OTP_RECEIVED"} and order_data.get("otp_code"):
-                        st = "OK"
-                        val = str(order_data.get("otp_code"))
-                    elif st_code in {"CANCELLED", "CANCELED", "TIMEOUT", "EXPIRED", "FAILED"}:
-                        st = "CANCEL"
-                        val = None
-                    else:
-                        st = "WAIT"
-                        val = None
-                except Exception:
-                    continue
-            else:
-                try:
-                    st, val = parse_status(await api.call("getStatus", id=aid))
-                except Exception:
-                    continue
-            if st == "WAIT":
-                continue
-            if st == "OK" and val:
-                otp = str(val)
-                phone = normalize_phone(act.get("phone") or user_row.get("phone") or "Unknown")
-                service_code = str(act.get("service_code") or user_row.get("service_code") or "")
-                service_name = (
-                    app.bot_data.get("svc_cache", {}).get("map", {}).get(service_code)
-                    or service_code
-                )
-                kb = InlineKeyboardMarkup(
-                    [
-                        [copy_button(tt(lang, "copy_otp"), otp, f"cp:otp:{user_id}")],
-                        [InlineKeyboardButton(tt(lang, "home"), callback_data="hm", style="danger")],
-                    ]
-                )
-                msg = tt(
-                    lang,
-                    "otp",
-                    otp="TOKENOTPVAL",
-                    phone="TOKENPHONEVAL",
-                    service=service_name,
-                )
-                md_msg = md(msg).replace("TOKENOTPVAL", cd(otp)).replace("TOKENPHONEVAL", cd(phone))
-                await app.bot.send_message(
-                    chat_id,
-                    md_msg,
-                    parse_mode=ParseMode.MARKDOWN_V2,
-                    reply_markup=kb,
-                )
+                    user_row = await adb(db.get, user_id) or {}
+                except Exception as e:
+                    logger.warning("Polling aid=%s: failed to fetch user %s: %s", aid, user_id, e)
+                    user_row = {}
+                lang = lang_from_code(user_row.get("lang"))
+                is_smscode = bool(act.get("provider") == "smscode" or str(aid).startswith("sc_"))
                 if is_smscode and smscode_api:
                     try:
                         raw_id = str(aid).removeprefix("sc_")
-                        await smscode_api.finish_order(raw_id)
+                        order_res = await smscode_api.get_order(raw_id)
+                        order_data = order_res.get("data", {}) if isinstance(order_res, dict) else {}
+                        st_code = str(order_data.get("status", "")).upper()
+                        if st_code in {"RECEIVED", "COMPLETED", "FINISHED", "OTP_RECEIVED"} and order_data.get("otp_code"):
+                            st = "OK"
+                            val = str(order_data.get("otp_code"))
+                        elif st_code in {"CANCELLED", "CANCELED", "TIMEOUT", "EXPIRED", "FAILED"}:
+                            st = "CANCEL"
+                            val = None
+                        else:
+                            st = "WAIT"
+                            val = None
                     except Exception:
-                        pass
+                        continue
                 else:
                     try:
-                        await api.call("setStatus", id=aid, status=6)
+                        st, val = parse_status(await api.call("getStatus", id=aid))
                     except Exception:
-                        pass
-                await adb(db.set_activation_status, aid, "otp_received", otp)
-                break
-            if st == "CANCEL":
-                await adb(db.set_activation_status, aid, "cancelled")
-                refund = await adb(db.refund_activation_if_needed, aid)
-                txt = tt(lang, "cancelled")
-                if refund:
-                    txt = f"{txt}\n{tt(lang, 'refund_done', amount=refund.get('amount'))}"
-                await app.bot.send_message(
-                    chat_id,
-                    md(txt),
-                    parse_mode=ParseMode.MARKDOWN_V2,
-                    reply_markup=main_menu(lang, role_of(user_row)),
-                )
-                break
-            if st == "ERROR":
-                await adb(db.set_activation_status, aid, "error")
-                refund = await adb(db.refund_activation_if_needed, aid)
-                txt = api_error(lang, val or "UNKNOWN")
-                if refund:
-                    txt = f"{txt}\n{tt(lang, 'refund_done', amount=refund.get('amount'))}"
-                await app.bot.send_message(
-                    chat_id,
-                    md(txt),
-                    parse_mode=ParseMode.MARKDOWN_V2,
-                    reply_markup=main_menu(lang, role_of(user_row)),
-                )
-                break
-        tasks.pop(str(aid), None)
+                        continue
+                if st == "WAIT":
+                    continue
+                if st == "OK" and val:
+                    otp = str(val)
+                    phone = normalize_phone(act.get("phone") or user_row.get("phone") or "Unknown")
+                    service_code = str(act.get("service_code") or user_row.get("service_code") or "")
+                    service_name = (
+                        app.bot_data.get("svc_cache", {}).get("map", {}).get(service_code)
+                        or service_code
+                    )
+                    kb = InlineKeyboardMarkup(
+                        [
+                            [copy_button(tt(lang, "copy_otp"), otp, f"cp:otp:{user_id}")],
+                            [InlineKeyboardButton(tt(lang, "home"), callback_data="hm", style="danger")],
+                        ]
+                    )
+                    msg = tt(
+                        lang,
+                        "otp",
+                        otp="TOKENOTPVAL",
+                        phone="TOKENPHONEVAL",
+                        service=service_name,
+                    )
+                    md_msg = md(msg).replace("TOKENOTPVAL", cd(otp)).replace("TOKENPHONEVAL", cd(phone))
+                    try:
+                        await app.bot.send_message(
+                            chat_id,
+                            md_msg,
+                            parse_mode=ParseMode.MARKDOWN_V2,
+                            reply_markup=kb,
+                        )
+                    except Exception as e:
+                        logger.error("Polling aid=%s: failed to send OTP message to chat %s: %s", aid, chat_id, e)
+                    if is_smscode and smscode_api:
+                        try:
+                            raw_id = str(aid).removeprefix("sc_")
+                            await smscode_api.finish_order(raw_id)
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            await api.call("setStatus", id=aid, status=6)
+                        except Exception:
+                            pass
+                    try:
+                        await adb(db.set_activation_status, aid, "otp_received", otp)
+                    except Exception as e:
+                        logger.error("Polling aid=%s: failed to set activation status otp_received: %s", aid, e)
+                    break
+                if st == "CANCEL":
+                    try:
+                        await adb(db.set_activation_status, aid, "cancelled")
+                        refund = await adb(db.refund_activation_if_needed, aid)
+                        txt = tt(lang, "cancelled")
+                        if refund:
+                            txt = f"{txt}\n{tt(lang, 'refund_done', amount=refund.get('amount'))}"
+                        await app.bot.send_message(
+                            chat_id,
+                            md(txt),
+                            parse_mode=ParseMode.MARKDOWN_V2,
+                            reply_markup=main_menu(lang, role_of(user_row)),
+                        )
+                    except Exception as e:
+                        logger.error("Polling aid=%s: error handling cancellation: %s", aid, e)
+                    break
+                if st == "ERROR":
+                    try:
+                        await adb(db.set_activation_status, aid, "error")
+                        refund = await adb(db.refund_activation_if_needed, aid)
+                        txt = api_error(lang, val or "UNKNOWN")
+                        if refund:
+                            txt = f"{txt}\n{tt(lang, 'refund_done', amount=refund.get('amount'))}"
+                        await app.bot.send_message(
+                            chat_id,
+                            md(txt),
+                            parse_mode=ParseMode.MARKDOWN_V2,
+                            reply_markup=main_menu(lang, role_of(user_row)),
+                        )
+                    except Exception as e:
+                        logger.error("Polling aid=%s: error handling error status: %s", aid, e)
+                    break
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error("Unhandled exception in poll task for aid=%s: %s", aid, e, exc_info=True)
+        finally:
+            tasks.pop(str(aid), None)
 
     cur = tasks.get(str(aid))
     if cur and not cur.done():
@@ -5745,9 +5821,16 @@ async def post_init(app: Application) -> None:
         except Exception as e:
             logger.warning("SMSCode warm-up failed: %s", e)
 
-    for row in await adb(db.list_active_activations):
+    try:
+        active_activations = await adb(db.list_active_activations)
+    except Exception as e:
+        logger.warning("Failed to fetch active activations at post-init: %s", e)
+        active_activations = []
+
+    for row in active_activations:
         try:
             await start_poll_task(app, str(row["activation_id"]))
+            await asyncio.sleep(0.05)
         except Exception as e:
             logger.warning("resume polling failed user=%s err=%s", row.get("user_id"), e)
     logger.info("Templine bot post-init complete")
