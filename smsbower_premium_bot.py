@@ -65,6 +65,14 @@ except Exception:
     pycountry = None
 
 try:
+    import phonenumbers
+    from phonenumbers import geocoder, phonenumberutil
+except Exception:
+    phonenumbers = None
+    geocoder = None
+    phonenumberutil = None
+
+try:
     from telegram import CopyTextButton
 
     HAS_COPY = True
@@ -752,7 +760,8 @@ def country_name_to_iso2(name: str) -> Optional[str]:
 def canonical_country_info(iso2: Optional[str], name: Optional[str]) -> Tuple[Optional[str], str]:
     iso = (iso2 or "").strip().upper()
     if not (iso and len(iso) == 2 and iso.isalpha()):
-        if name:
+        iso = ""
+        if name and not name.lower().startswith("country ") and "unknown" not in name.lower():
             iso = country_name_to_iso2(name) or ""
     if iso and pycountry:
         try:
@@ -763,6 +772,150 @@ def canonical_country_info(iso2: Optional[str], name: Optional[str]) -> Tuple[Op
             pass
     clean_name = (name or "").strip() or (iso if iso else "Unknown")
     return (iso if iso else None), clean_name
+
+
+PHONE_PREFIX_TO_ISO = {
+    "1": "US", "7": "RU", "20": "EG", "27": "ZA", "30": "GR", "31": "NL", "32": "BE",
+    "33": "FR", "34": "ES", "36": "HU", "39": "IT", "40": "RO", "41": "CH", "43": "AT",
+    "44": "GB", "45": "DK", "46": "SE", "47": "NO", "48": "PL", "49": "DE", "51": "PE",
+    "52": "MX", "53": "CU", "54": "AR", "55": "BR", "56": "CL", "57": "CO", "58": "VE",
+    "60": "MY", "61": "AU", "62": "ID", "63": "PH", "64": "NZ", "65": "SG", "66": "TH",
+    "81": "JP", "82": "KR", "84": "VN", "86": "CN", "90": "TR", "91": "IN", "92": "PK",
+    "93": "AF", "94": "LK", "95": "MM", "98": "IR", "212": "MA", "213": "DZ", "216": "TN",
+    "218": "LY", "220": "GM", "221": "SN", "222": "MR", "223": "ML", "224": "GN", "225": "CI",
+    "226": "BF", "227": "NE", "228": "TG", "229": "BJ", "230": "MU", "231": "LR", "232": "SL",
+    "233": "GH", "234": "NG", "235": "TD", "236": "CF", "237": "CM", "238": "CV", "239": "ST",
+    "240": "GQ", "241": "GA", "242": "CG", "243": "CD", "244": "AO", "245": "GW", "248": "SC",
+    "249": "SD", "250": "RW", "251": "ET", "252": "SO", "253": "DJ", "254": "KE", "255": "TZ",
+    "256": "UG", "257": "BI", "258": "MZ", "260": "ZM", "261": "MG", "263": "ZW", "264": "NA",
+    "265": "MW", "266": "LS", "267": "BW", "268": "SZ", "269": "KM", "297": "AW", "298": "FO",
+    "299": "GL", "350": "GI", "351": "PT", "352": "LU", "353": "IE", "354": "IS", "355": "AL",
+    "356": "MT", "357": "CY", "358": "FI", "359": "BG", "370": "LT", "371": "LV", "372": "EE",
+    "373": "MD", "374": "AM", "375": "BY", "376": "AD", "377": "MC", "378": "SM", "380": "UA",
+    "381": "RS", "382": "ME", "385": "HR", "386": "SI", "387": "BA", "389": "MK", "420": "CZ",
+    "421": "SK", "423": "LI", "500": "FK", "501": "BZ", "502": "GT", "503": "SV", "504": "HN",
+    "505": "NI", "506": "CR", "507": "PA", "509": "HT", "590": "GP", "591": "BO", "592": "GY",
+    "593": "EC", "594": "GF", "595": "PY", "596": "MQ", "597": "SR", "598": "UY", "599": "CW",
+    "670": "TL", "673": "BN", "674": "NR", "675": "PG", "676": "TO", "677": "SB", "678": "VU",
+    "679": "FJ", "680": "PW", "682": "CK", "685": "WS", "686": "KI", "687": "NC", "688": "TV",
+    "689": "PF", "850": "KP", "852": "HK", "853": "MO", "855": "KH", "856": "LA", "880": "BD",
+    "886": "TW", "960": "MV", "961": "LB", "962": "JO", "963": "SY", "964": "IQ", "965": "KW",
+    "966": "SA", "967": "YE", "968": "OM", "970": "PS", "971": "AE", "972": "IL", "973": "BH",
+    "974": "QA", "975": "BT", "976": "MN", "977": "NP", "992": "TJ", "993": "TM", "994": "AZ",
+    "995": "GE", "996": "KG", "998": "UZ",
+}
+
+
+def resolve_country_from_phone(phone: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    if not phone:
+        return None, None
+    raw_digits = re.sub(r"[^\d]", "", str(phone))
+    if not raw_digits:
+        return None, None
+
+    # 1. Try phonenumbers library
+    if phonenumbers and phonenumberutil:
+        try:
+            pn = phonenumbers.parse("+" + raw_digits, None)
+            iso = phonenumberutil.region_code_for_number(pn)
+            if iso and len(iso) == 2 and iso != "ZZ":
+                cname = geocoder.country_name_for_number(pn, "en") if geocoder else None
+                return str(iso).upper(), cname or None
+        except Exception:
+            pass
+
+    # 2. Try prefix matching
+    for l in (4, 3, 2, 1):
+        if len(raw_digits) >= l:
+            pfx = raw_digits[:l]
+            if pfx in PHONE_PREFIX_TO_ISO:
+                return PHONE_PREFIX_TO_ISO[pfx], None
+
+    return None, None
+
+
+def resolve_country_display(
+    iso2: Optional[str] = None,
+    name: Optional[str] = None,
+    phone: Optional[str] = None,
+    country_code: Optional[str] = None,
+    panel: Optional[str] = None,
+    bot_data: Optional[Dict[str, Any]] = None,
+    lang: str = "en",
+) -> Tuple[str, Optional[str], str]:
+    """
+    Returns (country_display, resolved_iso2, resolved_name).
+    Ensures country_display always has the correct flag and real country name,
+    avoiding "Unknown Country" or "Country <id>" whenever possible.
+    """
+    iso = (iso2 or "").strip().upper()
+    if not (iso and len(iso) == 2 and iso.isalpha()):
+        iso = None
+
+    cname = (name or "").strip()
+    if cname:
+        c_low = cname.lower()
+        if c_low.startswith("country ") or "unknown" in c_low or c_low == "country":
+            cname = ""
+
+    # 1. Try phone number resolution if missing iso or name
+    if (not iso or not cname) and phone:
+        p_iso, p_name = resolve_country_from_phone(phone)
+        if p_iso and not iso:
+            iso = p_iso
+        if p_name and not cname:
+            cname = p_name
+
+    # 2. Try bot_data cache lookup if still missing iso or name
+    if (not iso or not cname) and bot_data:
+        # SMSBower lookup
+        if panel == "SMSBower" or (country_code and str(country_code).isdigit() and panel != "SMSCode"):
+            items = bot_data.get("country_cache", {}).get("items", {})
+            cinfo = items.get(str(country_code)) or {}
+            if not cname and cinfo.get("name"):
+                cname = str(cinfo["name"]).strip()
+            if not iso and cinfo.get("iso2"):
+                raw_iso = str(cinfo["iso2"]).strip().upper()
+                if len(raw_iso) == 2 and raw_iso.isalpha():
+                    iso = raw_iso
+
+        # SMSCode lookup
+        if (not iso or not cname) and (panel == "SMSCode" or (country_code and str(country_code).isdigit())):
+            sc_cache = bot_data.get("smscode_countries", {})
+            cinfo = sc_cache.get(country_code) or sc_cache.get(str(country_code)) or {}
+            if not cname and cinfo.get("name"):
+                cname = str(cinfo["name"]).strip()
+            if not iso and cinfo.get("code"):
+                raw_iso = str(cinfo["code"]).strip().upper()
+                if len(raw_iso) == 2 and raw_iso.isalpha():
+                    iso = raw_iso
+
+    # 3. Canonical resolution via pycountry
+    if iso:
+        if pycountry:
+            try:
+                c = pycountry.countries.get(alpha_2=iso)
+                if c and getattr(c, "name", None):
+                    cname = c.name
+            except Exception:
+                pass
+    elif cname:
+        guessed_iso = country_name_to_iso2(cname)
+        if guessed_iso:
+            iso = guessed_iso
+            if pycountry:
+                try:
+                    c = pycountry.countries.get(alpha_2=iso)
+                    if c and getattr(c, "name", None):
+                        cname = c.name
+                except Exception:
+                    pass
+
+    # 4. Final name fallback
+    final_name = cname or (f"Country {country_code}" if country_code and str(country_code).isdigit() else tt(lang, "fallback_country"))
+    final_flag = to_flag(iso)
+    display = f"{final_flag} {final_name}"
+    return display, iso, final_name
 
 
 def option_country_key(opt: Any) -> str:
@@ -3175,13 +3328,18 @@ def price_page_text(
 
 
 def make_buy_callback(opt: PriceOption) -> str:
+    iso = (opt.country_iso2 or "").strip().upper()
     if opt.panel == "SMSCode" and opt.smscode_product_id:
         p = str(opt.price or "0").strip()
+        if iso and len(iso) == 2 and iso.isalpha():
+            return f"by:sc:{opt.service_code}:{opt.smscode_product_id}:{p}:{iso}"
         return f"by:sc:{opt.service_code}:{opt.smscode_product_id}:{p}"
     else:
         pid = str(opt.provider_id or "0").strip()
         base_p = str(opt.base_price or opt.price or "0").strip()
         p = str(opt.price or "0").strip()
+        if iso and len(iso) == 2 and iso.isalpha():
+            return f"by:sb:{opt.service_code}:{opt.country_code}:{pid}:{base_p}:{p}:{iso}"
         return f"by:sb:{opt.service_code}:{opt.country_code}:{pid}:{base_p}:{p}"
 
 
@@ -4619,7 +4777,7 @@ async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     provider_name: Optional[str] = None
 
     if len(parts) >= 5 and parts[1] == "sc":
-        # Format: by:sc:{service}:{product_id}:{price}
+        # Format: by:sc:{service}:{product_id}:{price}[:{iso}]
         panel = "SMSCode"
         service_code = parts[2]
         try:
@@ -4628,15 +4786,19 @@ async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             smscode_product_id = None
         price_str = parts[4] if len(parts) > 4 else "0"
         base_cost_str = price_str
+        if len(parts) >= 6 and len(parts[5]) == 2 and parts[5].isalpha():
+            country_iso2 = parts[5].upper()
 
     elif len(parts) >= 6 and parts[1] == "sb":
-        # Format: by:sb:{service}:{country}:{provider}:{base_price}:{price}
+        # Format: by:sb:{service}:{country}:{provider}:{base_price}:{price}[:{iso}]
         panel = "SMSBower"
         service_code = parts[2]
         country_code = parts[3]
         provider_id = parts[4] if parts[4] not in ("0", "none", "null") else None
         base_cost_str = parts[5]
         price_str = parts[6] if len(parts) > 6 else base_cost_str
+        if len(parts) >= 8 and len(parts[7]) == 2 and parts[7].isalpha():
+            country_iso2 = parts[7].upper()
 
     elif len(parts) == 3 and parts[1] not in ("sc", "sb"):
         # Legacy format: by:{service_code}:{idx}
@@ -4681,31 +4843,44 @@ async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         svc_map = context.application.bot_data.get("svc_cache", {}).get("map", {})
         service_name = svc_map.get(service_code) or service_code.upper()
 
-    if not country_name:
+    if not country_name or country_name.lower().startswith("country ") or "unknown" in country_name.lower():
+        country_name = ""
         if panel == "SMSBower":
-            c_cache = context.application.bot_data.get("countries", {})
-            c_info = c_cache.get(country_code) or {}
-            country_name = c_info.get("name") or f"Country {country_code}"
-            country_iso2 = c_info.get("iso")
+            c_cache = context.application.bot_data.get("country_cache", {}).get("items", {})
+            c_info = c_cache.get(str(country_code)) or {}
+            c_name_val = c_info.get("name")
+            if c_name_val:
+                country_name = c_name_val
+            if not country_iso2 and c_info.get("iso2"):
+                country_iso2 = str(c_info.get("iso2")).upper()
         else:
             sc_cache = context.application.bot_data.get("smscode_countries", {})
-            c_info = sc_cache.get(country_code) or {}
-            country_name = c_info.get("name") or f"Country {country_code}"
-            country_iso2 = c_info.get("code")
+            c_info = sc_cache.get(country_code) or sc_cache.get(str(country_code)) or {}
+            c_name_val = c_info.get("name")
+            if c_name_val:
+                country_name = c_name_val
+            if not country_iso2 and c_info.get("code"):
+                country_iso2 = str(c_info.get("code")).upper()
 
-    if not country_name or not country_iso2:
+    if (not country_name or not country_iso2) and service_code:
         cached_opts = context.user_data.get(f"price_{service_code}") or []
         for o in cached_opts:
             if panel == "SMSCode" and o.smscode_product_id == smscode_product_id:
-                country_name = country_name or o.country_name
-                country_iso2 = country_iso2 or o.country_iso2
-                provider_name = provider_name or o.provider_name
+                if not country_name and o.country_name:
+                    country_name = o.country_name
+                if not country_iso2 and o.country_iso2:
+                    country_iso2 = o.country_iso2
+                if not provider_name and o.provider_name:
+                    provider_name = o.provider_name
                 break
-            elif panel == "SMSBower" and o.country_code == country_code:
-                country_name = country_name or o.country_name
-                country_iso2 = country_iso2 or o.country_iso2
+            elif panel == "SMSBower" and str(o.country_code) == str(country_code):
+                if not country_name and o.country_name:
+                    country_name = o.country_name
+                if not country_iso2 and o.country_iso2:
+                    country_iso2 = o.country_iso2
                 if provider_id and o.provider_id == provider_id:
-                    provider_name = provider_name or o.provider_name
+                    if not provider_name and o.provider_name:
+                        provider_name = o.provider_name
                     break
 
     panels = await adb(db.get_panel_status) if hasattr(db, "get_panel_status") else {"smsbower": True, "smscode": True}
@@ -4804,8 +4979,18 @@ async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     logger.info("Purchase succeeded: aid=%s phone=%s user_id=%s panel=%s", aid, phone, q.from_user.id, panel)
 
+    country_display, resolved_iso2, resolved_name = resolve_country_display(
+        iso2=country_iso2,
+        name=country_name,
+        phone=phone,
+        country_code=country_code,
+        panel=panel,
+        bot_data=context.application.bot_data,
+        lang=lang,
+    )
+
     saved_pid = f"sc:{smscode_product_id}" if panel == "SMSCode" and smscode_product_id else provider_id
-    saved_country = country_code or (country_iso2 or "SMSCode" if panel == "SMSCode" else "")
+    saved_country = country_code or resolved_iso2 or (country_iso2 or "SMSCode" if panel == "SMSCode" else "")
     await adb(
         db.add_activation,
         q.from_user.id,
@@ -4818,12 +5003,7 @@ async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         base_price=base_cost,
         charged_price=charge if role in {ROLE_USER, ROLE_SUPER} else 0,
     )
-    await adb(db.set_activation, q.from_user.id, q.message.chat_id, aid, service_code, country_code, provider_id, phone)
-
-    canonical_iso, canonical_name = canonical_country_info(country_iso2, country_name)
-    resolved_name = canonical_name or country_name or tt(lang, "fallback_country")
-    resolved_iso2 = canonical_iso or country_iso2 or country_name_to_iso2(resolved_name)
-    country_display = f"{to_flag(resolved_iso2)} {resolved_name}"
+    await adb(db.set_activation, q.from_user.id, q.message.chat_id, aid, service_code, country_code or resolved_iso2, provider_id, phone)
 
     price_val = money(price_str) if price_str else "0"
     if is_admin:
@@ -4840,10 +5020,16 @@ async def cb_buy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         price=price_val,
     )
     if panel == "SMSCode" and smscode_product_id:
-        another_cb = f"an:sc:{service_code}:{smscode_product_id}:{price_str}"
+        if resolved_iso2:
+            another_cb = f"an:sc:{service_code}:{smscode_product_id}:{price_str}:{resolved_iso2}"
+        else:
+            another_cb = f"an:sc:{service_code}:{smscode_product_id}:{price_str}"
     else:
         pid_clean = str(provider_id or "0").strip()
-        another_cb = f"an:sb:{service_code}:{country_code}:{pid_clean}:{base_cost_str}:{price_str}"
+        if resolved_iso2:
+            another_cb = f"an:sb:{service_code}:{country_code}:{pid_clean}:{base_cost_str}:{price_str}:{resolved_iso2}"
+        else:
+            another_cb = f"an:sb:{service_code}:{country_code}:{pid_clean}:{base_cost_str}:{price_str}"
     kb = InlineKeyboardMarkup(
         [
             [copy_button(tt(lang, "copy_num"), phone, f"cp:num:{q.from_user.id}")],
@@ -4888,7 +5074,7 @@ async def cb_another(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     provider_name: Optional[str] = None
 
     if len(parts) >= 5 and parts[1] == "sc":
-        # Format: an:sc:{service}:{product_id}:{price}
+        # Format: an:sc:{service}:{product_id}:{price}[:{iso}]
         panel = "SMSCode"
         service_code = parts[2]
         try:
@@ -4897,15 +5083,19 @@ async def cb_another(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             smscode_product_id = None
         price_str = parts[4] if len(parts) > 4 else "0"
         base_cost_str = price_str
+        if len(parts) >= 6 and len(parts[5]) == 2 and parts[5].isalpha():
+            country_iso2 = parts[5].upper()
 
     elif len(parts) >= 6 and parts[1] == "sb":
-        # Format: an:sb:{service}:{country}:{provider}:{base_price}:{price}
+        # Format: an:sb:{service}:{country}:{provider}:{base_price}:{price}[:{iso}]
         panel = "SMSBower"
         service_code = parts[2]
         country_code = parts[3]
         provider_id = parts[4] if parts[4] not in ("0", "none", "null") else None
         base_cost_str = parts[5]
         price_str = parts[6] if len(parts) > 6 else base_cost_str
+        if len(parts) >= 8 and len(parts[7]) == 2 and parts[7].isalpha():
+            country_iso2 = parts[7].upper()
 
     else:
         # Legacy format: an:{service_code}:{country_code}:{provider_token}
@@ -5082,8 +5272,41 @@ async def cb_another(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     logger.info("cb_another purchase succeeded: aid=%s phone=%s user_id=%s panel=%s", aid, phone, q.from_user.id, panel)
 
+    if not service_name:
+        svc_map = context.application.bot_data.get("svc_cache", {}).get("map", {})
+        service_name = svc_map.get(service_code) or service_code.upper()
+
+    if not country_name or country_name.lower().startswith("country ") or "unknown" in country_name.lower():
+        country_name = ""
+        if panel == "SMSBower":
+            c_cache = context.application.bot_data.get("country_cache", {}).get("items", {})
+            c_info = c_cache.get(str(country_code)) or {}
+            c_name_val = c_info.get("name")
+            if c_name_val:
+                country_name = c_name_val
+            if not country_iso2 and c_info.get("iso2"):
+                country_iso2 = str(c_info.get("iso2")).upper()
+        else:
+            sc_cache = context.application.bot_data.get("smscode_countries", {})
+            c_info = sc_cache.get(country_code) or sc_cache.get(str(country_code)) or {}
+            c_name_val = c_info.get("name")
+            if c_name_val:
+                country_name = c_name_val
+            if not country_iso2 and c_info.get("code"):
+                country_iso2 = str(c_info.get("code")).upper()
+
+    country_display, resolved_iso2, resolved_name = resolve_country_display(
+        iso2=country_iso2,
+        name=country_name,
+        phone=phone,
+        country_code=country_code,
+        panel=panel,
+        bot_data=context.application.bot_data,
+        lang=lang,
+    )
+
     saved_pid = f"sc:{smscode_product_id}" if panel == "SMSCode" and smscode_product_id else provider_id
-    saved_country = country_code or (country_iso2 or "SMSCode" if panel == "SMSCode" else "")
+    saved_country = country_code or resolved_iso2 or (country_iso2 or "SMSCode" if panel == "SMSCode" else "")
     await adb(
         db.add_activation,
         q.from_user.id,
@@ -5096,32 +5319,7 @@ async def cb_another(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         base_price=base_cost,
         charged_price=charge if role in {ROLE_USER, ROLE_SUPER} else 0,
     )
-    await adb(db.set_activation, q.from_user.id, q.message.chat_id, aid, service_code, country_code, provider_id, phone)
-
-    if not service_name:
-        svc_map = context.application.bot_data.get("svc_cache", {}).get("map", {})
-        service_name = svc_map.get(service_code) or service_code.upper()
-
-    if not country_name:
-        if panel == "SMSBower":
-            c_cache = context.application.bot_data.get("countries", {})
-            c_info = c_cache.get(country_code) or {}
-            country_name = c_info.get("name") or f"Country {country_code}"
-            country_iso2 = c_info.get("iso")
-        else:
-            sc_cache = context.application.bot_data.get("smscode_countries", {})
-            c_info = sc_cache.get(country_code) or {}
-            country_name = c_info.get("name")
-            country_iso2 = c_info.get("code")
-            if not country_name and phone:
-                if phone.startswith("+62") or phone.startswith("62"):
-                    country_name = "Indonesia"
-                    country_iso2 = "ID"
-
-    canonical_iso, canonical_name = canonical_country_info(country_iso2, country_name)
-    resolved_name = canonical_name or country_name or tt(lang, "fallback_country")
-    resolved_iso2 = canonical_iso or country_iso2 or country_name_to_iso2(resolved_name)
-    country_display = f"{to_flag(resolved_iso2)} {resolved_name}"
+    await adb(db.set_activation, q.from_user.id, q.message.chat_id, aid, service_code, country_code or resolved_iso2, provider_id, phone)
 
     price_val = money(price_str) if price_str else "0"
     if is_admin:
@@ -5139,10 +5337,16 @@ async def cb_another(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
 
     if panel == "SMSCode" and smscode_product_id:
-        another_cb = f"an:sc:{service_code}:{smscode_product_id}:{price_str}"
+        if resolved_iso2:
+            another_cb = f"an:sc:{service_code}:{smscode_product_id}:{price_str}:{resolved_iso2}"
+        else:
+            another_cb = f"an:sc:{service_code}:{smscode_product_id}:{price_str}"
     else:
         pid_clean = str(provider_id or "0").strip()
-        another_cb = f"an:sb:{service_code}:{country_code}:{pid_clean}:{base_cost_str}:{price_str}"
+        if resolved_iso2:
+            another_cb = f"an:sb:{service_code}:{country_code}:{pid_clean}:{base_cost_str}:{price_str}:{resolved_iso2}"
+        else:
+            another_cb = f"an:sb:{service_code}:{country_code}:{pid_clean}:{base_cost_str}:{price_str}"
 
     kb = InlineKeyboardMarkup(
         [
